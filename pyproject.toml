@@ -1,0 +1,27 @@
+[project]
+name = "cheesemonger"
+version = "0.1.0"
+description = "A storage system for large perturb-seq data"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "xarray",
+    "zarr>=2.18,<3",
+    "netCDF4",
+    "h5netcdf",
+    "dask[array]",
+    "gcsfs",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ipykernel",
+    "jupyter",
+    "matplotlib",
+    "seaborn",
+    "pandas",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

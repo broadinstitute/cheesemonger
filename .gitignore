@@ -34,3 +34,12 @@ cover/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+
+# Virtual environment
+.venv/
+
+# Simulated/benchmark data
+data/
+
+# uv lock file is committed, but ignore local cache
+.uv/
