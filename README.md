@@ -40,16 +40,47 @@ python3 -m cheesemonger simulate --format both
 python3 -m cheesemonger simulate --scale tiny --format both -v --output-dir data/my_test
 ```
 
-Output is written to `data/simulated/` by default, producing `pesca_simulated.zarr/` and/or `pesca_simulated.nc`.
+Output is written to `data/simulated/pesca/zarr/` and `data/simulated/pesca/netcdf/` by default. Each screen gets its own independent store.
+
+## Storage layout
+
+Each screen is stored as a separate Zarr store or NetCDF file, making screen-level add/delete/replace operations O(1):
+
+```
+data/simulated/pesca/zarr/
+├── _registry.json              ← list of active screens
+├── Screen_000/
+│   └── data.zarr/              ← 3-D arrays: (timepoint, perturbation, gene_expression)
+├── Screen_001/
+│   └── data.zarr/
+└── ...
+```
+
+Deleting a screen removes one directory and updates the registry — no other screen's data is touched.
+
+## Running benchmarks
+
+After generating data, benchmark query latency:
+
+```bash
+# Benchmark both formats on tiny data (quick sanity check)
+python3 -m cheesemonger simulate --scale tiny --format both
+python3 -m cheesemonger benchmark --scale tiny --format both
+
+# Benchmark with more iterations and warmup
+python3 -m cheesemonger benchmark --scale small --format zarr -n 20 --warmup 3 -v
+```
+
+The benchmark runs 9 query patterns (6 series, 2 aggregation, 1 diagonal) and reports min/p50/p95/p99/max latency for each.
 
 ## Data generation flow
 
 The simulation script generates random data matching the real dataset's structure. Data is produced one screen at a time, mimicking the real ingestion pattern.
 
 ```
-DatasetSchema ──► generate per-screen data ──┬──► Zarr Store
+CSV Input ──► DatasetSchema ──► generate per-screen data ──┬──► Zarr Store (per screen)
                                        │                   │
-                                       ▼                   └──► NetCDF File
+                                       ▼                   └──► NetCDF File (per screen)
                                   ZScore array
                                   L2FC array
                                   FDR array
@@ -60,11 +91,21 @@ DatasetSchema ──► generate per-screen data ──┬──► Zarr Store
 `DatasetSchema` declares each dimension's cardinality and each datatype's name, dimensions, and dtype. The schema is the single source of truth for the entire pipeline.
 
 **Step 2: Generate coordinates.**
-Synthetic labels are created for each dimension: `"Screen_000"` through `"Screen_029"`, timepoints `[4, 7]`, `"Gene_00000"` through `"Gene_09999"`, and `"RGene_00000"` through `"RGene_17999"`.
+Synthetic labels are created for each dimension: timepoints `[4, 7]`, `"Gene_00000"` through `"Gene_09999"`, and `"RGene_00000"` through `"RGene_17999"`.
 
 **Step 3: Generate per-screen data.**
-For each screen, generate a random float32 array of shape `(1, 2, 10000, 18000)` for every 4-D datatype. One screen across all 15 datatypes is about 10 GB uncompressed at full scale.
+For each screen, generate a random float32 array of shape `(2, 10000, 18000)` for every 3-D datatype. One screen across all 15 datatypes is about 10 GB uncompressed at full scale.
 
-**Step 4: Append to store.**
-Each screen's data is appended along the screen axis. Zarr writes new chunk files. NetCDF extends its unlimited dimension. After all screens, the store is complete.
+**Step 4: Write each screen.**
+Each screen's data is written as an independent store (Zarr directory or NetCDF file) and registered in `_registry.json`.
 
+## Jupyter notebooks
+
+After activating the environment, register the kernel and launch Jupyter:
+
+```bash
+python3 -m ipykernel install --user --name cheesemonger --display-name "cheesemonger"
+jupyter notebook
+```
+
+Select the **cheesemonger** kernel when opening notebooks.
