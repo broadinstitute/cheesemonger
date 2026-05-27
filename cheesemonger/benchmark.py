@@ -291,7 +291,14 @@ def main():
     parser.add_argument(
         "--dataset-name",
         default="pesca_simulated",
-        help="Dataset name (default: pesca_simulated)",
+        help="Dataset base name (default: pesca_simulated)",
+    )
+    parser.add_argument(
+        "--scale",
+        choices=list(SCALE_PRESETS.keys()),
+        default="small",
+        help="Scale used when generating data (default: small). "
+             "Appended to dataset name in filenames.",
     )
     parser.add_argument(
         "--chunk-preset",
@@ -316,9 +323,17 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+    logging.getLogger("numcodecs").setLevel(logging.WARNING)
+    logging.getLogger("zarr").setLevel(logging.WARNING)
+    logging.getLogger("gcsfs").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("google").setLevel(logging.WARNING)
+    logging.getLogger("fsspec").setLevel(logging.WARNING)
 
     formats_to_test = ["zarr", "netcdf"] if args.format == "both" else [args.format]
     all_results: list[BenchmarkResult] = []
@@ -326,17 +341,19 @@ def main():
     data_dir = args.data_dir
     is_gcs = isinstance(data_dir, str) and data_dir.startswith("gs://")
 
+    ds_name = f"{args.dataset_name}_{args.scale}"
+
     if is_gcs:
         chunk_dir = f"{data_dir.rstrip('/')}/chunks_{args.chunk_preset}"
         fmt_paths: dict[str, Path | str] = {
-            "zarr": f"{chunk_dir}/{args.dataset_name}.zarr",
-            "netcdf": f"{chunk_dir}/{args.dataset_name}.nc",
+            "zarr": f"{chunk_dir}/{ds_name}.zarr",
+            "netcdf": f"{chunk_dir}/{ds_name}.nc",
         }
     else:
         local_chunk = Path(data_dir) / f"chunks_{args.chunk_preset}"
         fmt_paths = {
-            "zarr": local_chunk / f"{args.dataset_name}.zarr",
-            "netcdf": local_chunk / f"{args.dataset_name}.nc",
+            "zarr": local_chunk / f"{ds_name}.zarr",
+            "netcdf": local_chunk / f"{ds_name}.nc",
         }
 
     for fmt in formats_to_test:

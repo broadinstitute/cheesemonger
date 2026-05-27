@@ -133,13 +133,14 @@ def write_zarr(
     coords: dict[str, np.ndarray],
     seed: int = 42,
     chunk_preset: str = "big",
+    scale: str = "small",
 ) -> Path:
     """
     Write a simulated dataset to a Zarr store, one screen at a time.
 
     Uses xarray's native to_zarr() with append_dim for incremental writes.
     """
-    store_path = output_dir / f"{schema.name}.zarr"
+    store_path = output_dir / f"{schema.name}_{scale}.zarr"
     if store_path.exists():
         shutil.rmtree(store_path)
 
@@ -176,6 +177,7 @@ def write_netcdf(
     coords: dict[str, np.ndarray],
     seed: int = 42,
     chunk_preset: str = "big",
+    scale: str = "small",
 ) -> Path:
     """
     Write a simulated dataset to a NetCDF4 file.
@@ -187,7 +189,7 @@ def write_netcdf(
     for larger datasets and should be optimized in a way like incremental netCDF4-based 
     approach or backing the arrays with dask for lazy evaluation.
     """
-    out_path = output_dir / f"{schema.name}.nc"
+    out_path = output_dir / f"{schema.name}_{scale}.nc"
     if out_path.exists():
         out_path.unlink()
 
@@ -313,12 +315,12 @@ def main():
 
     if args.format in ("zarr", "both"):
         t0 = time.perf_counter()
-        path = write_zarr(schema, out_dir, coords, seed=args.seed, chunk_preset=chunk_preset)
+        path = write_zarr(schema, out_dir, coords, seed=args.seed, chunk_preset=chunk_preset, scale=args.scale)
         logger.info("Zarr complete in %.1fs -> %s", time.perf_counter() - t0, path)
 
     if args.format in ("netcdf", "both"):
         t0 = time.perf_counter()
-        path = write_netcdf(schema, out_dir, coords, seed=args.seed, chunk_preset=chunk_preset)
+        path = write_netcdf(schema, out_dir, coords, seed=args.seed, chunk_preset=chunk_preset, scale=args.scale)
         logger.info("NetCDF complete in %.1fs -> %s", time.perf_counter() - t0, path)
 
 
