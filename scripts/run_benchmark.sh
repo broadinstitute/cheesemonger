@@ -99,6 +99,28 @@ run_bench B2 --data-dir /mnt/data --format netcdf --scale "$SCALE" --chunk-prese
 run_bench C1 --data-dir /mnt/data --format zarr --scale "$SCALE" --chunk-preset big
 run_bench C2 --data-dir /mnt/data --format zarr --scale "$SCALE" --chunk-preset small
 
+# ── Step 4: Concurrent benchmarks ─────────────────────────────────────
+
+echo ""
+echo "=== Step 4: Concurrent read benchmarks ==="
+echo ""
+
+run_concurrent() {
+    local label=$1; shift
+    local out="${RESULTS_DIR}/${label}_concurrent_${SCALE}.txt"
+
+    echo "--- ${label} (concurrent 1,2,4,8 threads) → ${out}"
+    # Warm the page cache first
+    python3 -m cheesemonger benchmark "$@" -n 3 --warmup 1 > /dev/null 2>&1
+    python3 -m cheesemonger benchmark "$@" --concurrent 1 2 4 8 \
+        --concurrent-queries 40 2>&1 | tee "$out"
+}
+
+run_concurrent B1 --data-dir /mnt/data --format netcdf --scale "$SCALE" --chunk-preset big
+run_concurrent B2 --data-dir /mnt/data --format netcdf --scale "$SCALE" --chunk-preset small
+run_concurrent C1 --data-dir /mnt/data --format zarr --scale "$SCALE" --chunk-preset big
+run_concurrent C2 --data-dir /mnt/data --format zarr --scale "$SCALE" --chunk-preset small
+
 echo ""
 echo "========================================"
 echo "  Done. Results in ${RESULTS_DIR}/:"
