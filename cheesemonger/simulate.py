@@ -5,22 +5,38 @@ Usage:
     python -m cheesemonger simulate --help
 
 The script generates one screen at a time and appends it to the store,
+writing one variable at a time to keep peak memory low (~1.5 GB per
+variable instead of ~20+ GB for all 15 simultaneously).
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
 
 import numpy as np
-import xarray as xr
 
 from cheesemonger.schema import DatasetSchema, DatatypeSpec, pesca_schema
 
 logger = logging.getLogger(__name__)
+
+
+def _rss_mb() -> float:
+    """Current RSS of this process in MB (Linux/macOS)."""
+    try:
+        import resource
+        rusage = resource.getrusage(resource.RUSAGE_SELF)
+        if hasattr(rusage, "ru_maxrss"):
+            # macOS reports in bytes, Linux in KB
+            divisor = 1024 * 1024 if os.uname().sysname == "Darwin" else 1024
+            return rusage.ru_maxrss / divisor
+    except Exception:
+        pass
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -91,41 +107,18 @@ def chunk_sizes(
 
 
 # ---------------------------------------------------------------------------
-# Build one screen as an xarray Dataset
-# ---------------------------------------------------------------------------
-
-def build_screen_dataset(
-    schema: DatasetSchema,
-    coords: dict[str, np.ndarray],
-    screen_idx: int,
-    rng: np.random.Generator,
-) -> xr.Dataset:
-    """
-    Build an xr.Dataset containing one screen's worth of data for all
-    datatype shards.
-    """
-    screen_label = coords[schema.append_dim][screen_idx]
-
-    screen_coords = {
-        dim: labels if dim != schema.append_dim else [screen_label]
-        for dim, labels in coords.items()
-    }
-
-    data_vars: dict[str, tuple] = {}
-    for dt in schema.datatypes:
-        shape = tuple(
-            1 if dim == schema.append_dim else schema.dim_sizes[dim]
-            for dim in dt.dimensions
-        )
-        arr = rng.standard_normal(shape).astype(np.float32)
-        data_vars[dt.name] = (list(dt.dimensions), arr)
-
-    return xr.Dataset(data_vars, coords=screen_coords)
-
-
-# ---------------------------------------------------------------------------
 # Writers
 # ---------------------------------------------------------------------------
+
+def _fill_random_f32(rng: np.random.Generator, shape: tuple[int, ...]) -> np.ndarray:
+    """Generate a float32 random normal array without a full-size float64 temp."""
+    arr = np.empty(shape, dtype=np.float32)
+    # Slice along the first axis to keep the float64 intermediate small.
+    # For shape (2, 10000, 18000) this halves the temp from 2.88 GB to 1.44 GB.
+    for i in range(shape[0]):
+        arr[i] = rng.standard_normal(shape[1:]).astype(np.float32)
+    return arr
+
 
 def write_zarr(
     schema: DatasetSchema,
@@ -136,37 +129,86 @@ def write_zarr(
     scale: str = "small",
 ) -> Path:
     """
-    Write a simulated dataset to a Zarr store, one screen at a time.
+    Write a simulated dataset to a Zarr store, one variable at a time.
 
-    Uses xarray's native to_zarr() with append_dim for incremental writes.
+    Uses the zarr library directly so that only one variable's data for one
+    screen is in memory at any time.  The ``_ARRAY_DIMENSIONS`` attribute on
+    each array ensures the store is readable by ``xr.open_zarr()``.
     """
+    import numcodecs
+    import zarr
+
     store_path = output_dir / f"{schema.name}_{scale}.zarr"
     if store_path.exists():
         shutil.rmtree(store_path)
 
     rng = np.random.default_rng(seed)
     n_screens = schema.dim_sizes[schema.append_dim]
+    append_dim = schema.append_dim
 
-    encoding = {
-        dt.name: {"chunks": chunk_sizes(dt, schema, chunk_preset)}
-        for dt in schema.datatypes
-    }
+    root = zarr.open_group(str(store_path), mode="w")
 
+    # ── coordinate arrays ──────────────────────────────────────────────
+    for dim_name, labels in coords.items():
+        if labels.dtype.kind in ("U", "S"):
+            z_coord = root.create_dataset(
+                dim_name,
+                data=np.array(labels, dtype=object),
+                object_codec=numcodecs.VLenUTF8(),
+                chunks=(len(labels),),
+                overwrite=True,
+            )
+        else:
+            z_coord = root.create_dataset(
+                dim_name,
+                data=labels,
+                chunks=(len(labels),),
+                overwrite=True,
+            )
+        z_coord.attrs["_ARRAY_DIMENSIONS"] = [dim_name]
+
+    # ── create empty data arrays ───────────────────────────────────────
+    for dt in schema.datatypes:
+        full_shape = tuple(schema.dim_sizes[dim] for dim in dt.dimensions)
+        chunks = chunk_sizes(dt, schema, chunk_preset)
+        z_var = root.create_dataset(
+            dt.name,
+            shape=full_shape,
+            dtype=dt.dtype,
+            chunks=chunks,
+            fill_value=0.0,
+            overwrite=True,
+        )
+        z_var.attrs["_ARRAY_DIMENSIONS"] = list(dt.dimensions)
+
+    # ── fill data screen-by-screen, variable-by-variable ───────────────
     for screen_idx in range(n_screens):
         t0 = time.perf_counter()
-        ds = build_screen_dataset(schema, coords, screen_idx, rng)
+        for dt_i, dt in enumerate(schema.datatypes):
+            shape_no_screen = tuple(
+                schema.dim_sizes[dim]
+                for dim in dt.dimensions if dim != append_dim
+            )
+            arr = _fill_random_f32(rng, shape_no_screen)
 
-        if screen_idx == 0:
-            ds.to_zarr(str(store_path), mode="w", encoding=encoding)
-        else:
-            ds.to_zarr(str(store_path), append_dim=schema.append_dim)
+            dim_idx = list(dt.dimensions).index(append_dim)
+            slices = [slice(None)] * len(dt.dimensions)
+            slices[dim_idx] = screen_idx
+            root[dt.name][tuple(slices)] = arr
+            del arr
+
+            logger.debug(
+                "  var %d/%d (%s)  RSS=%.0f MB",
+                dt_i + 1, len(schema.datatypes), dt.name, _rss_mb(),
+            )
 
         elapsed = time.perf_counter() - t0
         logger.info(
-            "Screen %d/%d written to Zarr (%.1fs)",
-            screen_idx + 1, n_screens, elapsed,
+            "Screen %d/%d written to Zarr (%.1fs)  RSS=%.0f MB",
+            screen_idx + 1, n_screens, elapsed, _rss_mb(),
         )
 
+    zarr.consolidate_metadata(str(store_path))
     logger.info("Zarr store written to %s", store_path)
     return store_path
 
@@ -241,13 +283,12 @@ def write_netcdf(
         else:
             ncfile.variables[append_dim][screen_idx] = screen_label
 
-        for dt_spec in schema.datatypes:
+        for dt_i, dt_spec in enumerate(schema.datatypes):
             shape_no_screen = tuple(
                 schema.dim_sizes[dim]
                 for dim in dt_spec.dimensions if dim != append_dim
             )
-            arr = np.empty(shape_no_screen, dtype=np.float32)
-            arr[:] = rng.standard_normal(shape_no_screen)
+            arr = _fill_random_f32(rng, shape_no_screen)
 
             dim_idx = list(dt_spec.dimensions).index(append_dim)
             slices = [slice(None)] * len(dt_spec.dimensions)
@@ -256,10 +297,15 @@ def write_netcdf(
             del arr
             ncfile.sync()
 
+            logger.debug(
+                "  var %d/%d (%s)  RSS=%.0f MB",
+                dt_i + 1, len(schema.datatypes), dt_spec.name, _rss_mb(),
+            )
+
         elapsed = time.perf_counter() - t0
         logger.info(
-            "Screen %d/%d written to NetCDF (%.1fs)",
-            screen_idx + 1, n_screens, elapsed,
+            "Screen %d/%d written to NetCDF (%.1fs)  RSS=%.0f MB",
+            screen_idx + 1, n_screens, elapsed, _rss_mb(),
         )
 
     ncfile.close()

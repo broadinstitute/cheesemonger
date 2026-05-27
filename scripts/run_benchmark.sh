@@ -39,8 +39,8 @@ echo ""
 echo "=== Step 1/3: Generating data ==="
 echo ""
 
-python3 -m cheesemonger simulate --scale "$SCALE" --format both --chunk-preset big
-python3 -m cheesemonger simulate --scale "$SCALE" --format both --chunk-preset small
+python3 -m cheesemonger simulate --scale "$SCALE" --format both --chunk-preset big -v
+python3 -m cheesemonger simulate --scale "$SCALE" --format both --chunk-preset small -v
 
 # ── Step 2: Deploy data to storage (section 8) ─────────────────────────
 
