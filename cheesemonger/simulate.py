@@ -180,51 +180,84 @@ def write_netcdf(
     scale: str = "small",
 ) -> Path:
     """
-    Write a simulated dataset to a NetCDF4 file.
+    Write a simulated dataset to a NetCDF4 file, one screen at a time.
 
-    Builds each screen as an xr.Dataset, concatenates them, and writes once
-    with unlimited_dims so the screen axis can be extended later.
-
-    NOTE: this loads all screens into memory before writing. This will be an issue 
-    for larger datasets and should be optimized in a way like incremental netCDF4-based 
-    approach or backing the arrays with dask for lazy evaluation.
+    Uses the netCDF4 library directly for incremental writes so that only
+    one screen's data is in memory at any time.  The screen dimension is
+    created as UNLIMITED so it can be extended later.
     """
+    import netCDF4 as nc4
+
     out_path = output_dir / f"{schema.name}_{scale}.nc"
     if out_path.exists():
         out_path.unlink()
 
     rng = np.random.default_rng(seed)
     n_screens = schema.dim_sizes[schema.append_dim]
+    append_dim = schema.append_dim
 
-    encoding = {
-        dt.name: {
-            "chunksizes": chunk_sizes(dt, schema, chunk_preset),
-            "zlib": True,
-            "complevel": 1,
-        }
-        for dt in schema.datatypes
-    }
+    ncfile = nc4.Dataset(str(out_path), "w", format="NETCDF4")
 
-    screen_datasets = []
+    append_is_string = coords[append_dim].dtype.kind == "U"
+
+    for dim_name, labels in coords.items():
+        if dim_name == append_dim:
+            ncfile.createDimension(dim_name, None)
+        else:
+            ncfile.createDimension(dim_name, len(labels))
+
+        if labels.dtype.kind == "U":
+            max_len = max(len(s) for s in labels)
+            nc_dt = np.dtype(f"S{max_len}")
+            coord_var = ncfile.createVariable(dim_name, nc_dt, (dim_name,))
+            if dim_name != append_dim:
+                coord_var[:] = np.array(labels, dtype=nc_dt)
+        else:
+            coord_var = ncfile.createVariable(dim_name, labels.dtype, (dim_name,))
+            if dim_name != append_dim:
+                coord_var[:] = labels
+
+    for dt in schema.datatypes:
+        chunks = chunk_sizes(dt, schema, chunk_preset)
+        ncfile.createVariable(
+            dt.name,
+            dt.dtype,
+            dt.dimensions,
+            chunksizes=chunks,
+            zlib=True,
+            complevel=1,
+        )
+
     for screen_idx in range(n_screens):
         t0 = time.perf_counter()
-        ds = build_screen_dataset(schema, coords, screen_idx, rng)
-        screen_datasets.append(ds)
+        screen_label = coords[append_dim][screen_idx]
+
+        str_dt = ncfile.variables[append_dim].dtype
+        if append_is_string:
+            ncfile.variables[append_dim][screen_idx] = np.bytes_(screen_label)
+        else:
+            ncfile.variables[append_dim][screen_idx] = screen_label
+
+        for dt_spec in schema.datatypes:
+            shape = tuple(
+                1 if dim == append_dim else schema.dim_sizes[dim]
+                for dim in dt_spec.dimensions
+            )
+            arr = rng.standard_normal(shape).astype(np.float32)
+
+            dim_idx = list(dt_spec.dimensions).index(append_dim)
+            slices = [slice(None)] * len(dt_spec.dimensions)
+            slices[dim_idx] = screen_idx
+            ncfile.variables[dt_spec.name][tuple(slices)] = arr.squeeze(axis=dim_idx)
+
+        ncfile.sync()
         elapsed = time.perf_counter() - t0
         logger.info(
-            "Screen %d/%d generated for NetCDF (%.1fs)",
+            "Screen %d/%d written to NetCDF (%.1fs)",
             screen_idx + 1, n_screens, elapsed,
         )
 
-    t0 = time.perf_counter()
-    full_ds = xr.concat(screen_datasets, dim=schema.append_dim)
-    full_ds.to_netcdf(
-        str(out_path),
-        unlimited_dims=[schema.append_dim],
-        encoding=encoding,
-    )
-    logger.info("NetCDF written in %.1fs", time.perf_counter() - t0)
-
+    ncfile.close()
     logger.info("NetCDF file written to %s", out_path)
     return out_path
 

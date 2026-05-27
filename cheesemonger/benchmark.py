@@ -146,13 +146,17 @@ def build_query_specs(
             aggregate_threshold=0.1,
         ),
 
-        # --- Diagonal query ---
-        QuerySpec(
-            name="diagonal/L2FC_self_targeting",
-            datatype="L2FC",
-            constraints=fixed_2,
-            diagonal=("testedperturbation", "testedgeneexpression"),
-        ),
+        # Diagonal query (self-targeting: "when Gene X was knocked out, how
+        # did Gene X's expression change?") is disabled until real data is
+        # available. Simulated data uses different label prefixes for the two
+        # dimensions so the diagonal is always empty.
+        #
+        # QuerySpec(
+        #     name="diagonal/L2FC_self_targeting",
+        #     datatype="L2FC",
+        #     constraints=fixed_2,
+        #     diagonal=("testedperturbation", "testedgeneexpression"),
+        # ),
     ]
 
 

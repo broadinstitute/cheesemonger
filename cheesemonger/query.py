@@ -102,9 +102,18 @@ def get_vector(
     if constraints:
         da = da.sel(**constraints)
 
-    if diagonal is not None:
-        da = _extract_diagonal(da, diagonal)
-    elif aggregate == Aggregate.MEAN:
+    # Diagonal extraction is disabled for now. It answers "self-targeting"
+    # queries like "when Gene X was knocked out, how did Gene X's own
+    # expression change?" by pulling values where perturbation == expression.
+    # This requires real data where the two dimensions share coordinate
+    # labels (e.g. both use "TP53", "BRCA1", etc.). Simulated data uses
+    # different prefixes ("Gene_" vs "RGene_") so the diagonal is always
+    # empty. Uncomment when running against real data.
+    #
+    # if diagonal is not None:
+    #     da = _extract_diagonal(da, diagonal)
+    # elif aggregate == Aggregate.MEAN:
+    if aggregate == Aggregate.MEAN:
         if aggregate_over is None:
             raise ValueError("aggregate_over is required for MEAN aggregation")
         da = da.mean(dim=aggregate_over)
@@ -120,38 +129,39 @@ def get_vector(
     return result
 
 
-def _extract_diagonal(
-    da: xr.DataArray,
-    dims: tuple[str, str],
-) -> xr.DataArray:
-    """
-    Extract diagonal values where two dimensions share coordinate labels.
-
-    For example, with dims=("testedperturbation", "testedgeneexpression"),
-    returns the value at (perturbation=X, expression=X) for every X that
-    appears in both coordinate arrays.
-    """
-    dim_a, dim_b = dims
-    labels_a = da.coords[dim_a].values
-    labels_b = da.coords[dim_b].values
-
-    common = np.intersect1d(labels_a, labels_b)
-    if len(common) == 0:
-        return xr.DataArray(
-            np.array([], dtype=da.dtype),
-            dims=["label"],
-            coords={"label": np.array([], dtype=labels_a.dtype)},
-        )
-
-    da_selected = da.sel({dim_a: common, dim_b: common})
-    idx = np.arange(len(common))
-    values = da_selected.values[..., idx, idx]
-
-    remaining_dims = [d for d in da.dims if d not in dims]
-    if values.ndim == 1:
-        return xr.DataArray(values, dims=["label"], coords={"label": common})
-
-    result_coords: dict = {"label": common}
-    for d in remaining_dims:
-        result_coords[d] = da.coords[d].values
-    return xr.DataArray(values, dims=remaining_dims + ["label"], coords=result_coords)
+# def _extract_diagonal(
+#     da: xr.DataArray,
+#     dims: tuple[str, str],
+# ) -> xr.DataArray:
+#     """
+#     Extract diagonal values where two dimensions share coordinate labels.
+#
+#     For example, with dims=("testedperturbation", "testedgeneexpression"),
+#     returns the value at (perturbation=X, expression=X) for every X that
+#     appears in both coordinate arrays.  Disabled until real data is
+#     available — see comment in get_vector() above.
+#     """
+#     dim_a, dim_b = dims
+#     labels_a = da.coords[dim_a].values
+#     labels_b = da.coords[dim_b].values
+#
+#     common = np.intersect1d(labels_a, labels_b)
+#     if len(common) == 0:
+#         return xr.DataArray(
+#             np.array([], dtype=da.dtype),
+#             dims=["label"],
+#             coords={"label": np.array([], dtype=labels_a.dtype)},
+#         )
+#
+#     da_selected = da.sel({dim_a: common, dim_b: common})
+#     idx = np.arange(len(common))
+#     values = da_selected.values[..., idx, idx]
+#
+#     remaining_dims = [d for d in da.dims if d not in dims]
+#     if values.ndim == 1:
+#         return xr.DataArray(values, dims=["label"], coords={"label": common})
+#
+#     result_coords: dict = {"label": common}
+#     for d in remaining_dims:
+#         result_coords[d] = da.coords[d].values
+#     return xr.DataArray(values, dims=remaining_dims + ["label"], coords=result_coords)
