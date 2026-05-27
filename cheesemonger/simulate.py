@@ -48,25 +48,45 @@ def make_coords(schema: DatasetSchema) -> dict[str, np.ndarray]:
 # Chunking
 # ---------------------------------------------------------------------------
 
-def chunk_sizes(dt: DatatypeSpec, schema: DatasetSchema) -> tuple[int, ...]:
+CHUNK_PRESETS = {
+    "big": {
+        "testedperturbation": 1000,
+        "testedgeneexpression": 5000,
+        "default": 1000,
+    },
+    "small": {
+        "testedperturbation": 250,
+        "testedgeneexpression": 1000,
+        "default": 250,
+    },
+}
+
+
+def chunk_sizes(
+    dt: DatatypeSpec,
+    schema: DatasetSchema,
+    chunk_preset: str = "big",
+) -> tuple[int, ...]:
     """
     Choose chunk sizes for a datatype shard.
 
     Strategy: chunk size 1 along screen and timepoint (low cardinality, often
     constrained in queries), and larger chunks along testedperturbation/
     testedgeneexpression to give good read performance for series queries.
+
+    Presets:
+        big   — ~20 MB chunks: (1, 1, 1000, 5000). Series query = 4 chunks.
+        small — ~1 MB chunks:  (1, 1, 250, 1000).  Series query = 18 chunks.
     """
+    preset = CHUNK_PRESETS[chunk_preset]
     chunks = []
     for dim in dt.dimensions:
         size = schema.dim_sizes[dim]
         if dim in ("screen", "timepoint"):
             chunks.append(1)
-        elif dim == "testedperturbation":
-            chunks.append(min(1000, size))
-        elif dim == "testedgeneexpression":
-            chunks.append(min(5000, size))
         else:
-            chunks.append(min(1000, size))
+            target = preset.get(dim, preset["default"])
+            chunks.append(min(target, size))
     return tuple(chunks)
 
 
@@ -112,6 +132,7 @@ def write_zarr(
     output_dir: Path,
     coords: dict[str, np.ndarray],
     seed: int = 42,
+    chunk_preset: str = "big",
 ) -> Path:
     """
     Write a simulated dataset to a Zarr store, one screen at a time.
@@ -126,7 +147,7 @@ def write_zarr(
     n_screens = schema.dim_sizes[schema.append_dim]
 
     encoding = {
-        dt.name: {"chunks": chunk_sizes(dt, schema)}
+        dt.name: {"chunks": chunk_sizes(dt, schema, chunk_preset)}
         for dt in schema.datatypes
     }
 
@@ -154,6 +175,7 @@ def write_netcdf(
     output_dir: Path,
     coords: dict[str, np.ndarray],
     seed: int = 42,
+    chunk_preset: str = "big",
 ) -> Path:
     """
     Write a simulated dataset to a NetCDF4 file.
@@ -174,7 +196,7 @@ def write_netcdf(
 
     encoding = {
         dt.name: {
-            "chunksizes": chunk_sizes(dt, schema),
+            "chunksizes": chunk_sizes(dt, schema, chunk_preset),
             "zlib": True,
             "complevel": 1,
         }
@@ -252,6 +274,13 @@ def main():
         default=Path("data/simulated"),
         help="Output directory (default: data/simulated)",
     )
+    parser.add_argument(
+        "--chunk-preset",
+        choices=list(CHUNK_PRESETS.keys()),
+        default="big",
+        help="Chunk size preset (default: big). "
+             "big=~20MB chunks (1,1,1000,5000), small=~1MB chunks (1,1,250,1000)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -263,26 +292,33 @@ def main():
 
     preset = SCALE_PRESETS[args.scale]
     schema = pesca_schema(**preset)
+    chunk_preset = args.chunk_preset
+
+    sample_chunks = chunk_sizes(schema.datatypes[0], schema, chunk_preset)
+    chunk_mb = np.prod(sample_chunks) * 4 / (1024 ** 2)
 
     est_gb = _estimate_size(schema)
     logger.info(
-        "Scale=%s  dims=%s  estimated uncompressed=%.2f GB",
+        "Scale=%s  chunks=%s (~%.1f MB)  dims=%s  estimated uncompressed=%.2f GB",
         args.scale,
+        sample_chunks,
+        chunk_mb,
         dict(schema.dim_sizes),
         est_gb,
     )
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = args.output_dir / f"chunks_{chunk_preset}"
+    out_dir.mkdir(parents=True, exist_ok=True)
     coords = make_coords(schema)
 
     if args.format in ("zarr", "both"):
         t0 = time.perf_counter()
-        path = write_zarr(schema, args.output_dir, coords, seed=args.seed)
+        path = write_zarr(schema, out_dir, coords, seed=args.seed, chunk_preset=chunk_preset)
         logger.info("Zarr complete in %.1fs -> %s", time.perf_counter() - t0, path)
 
     if args.format in ("netcdf", "both"):
         t0 = time.perf_counter()
-        path = write_netcdf(schema, args.output_dir, coords, seed=args.seed)
+        path = write_netcdf(schema, out_dir, coords, seed=args.seed, chunk_preset=chunk_preset)
         logger.info("NetCDF complete in %.1fs -> %s", time.perf_counter() - t0, path)
 
 
