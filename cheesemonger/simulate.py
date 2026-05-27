@@ -220,11 +220,6 @@ def write_netcdf(
 
     for dt in schema.datatypes:
         chunks = chunk_sizes(dt, schema, chunk_preset)
-        chunk_bytes = int(np.prod(chunks) * 4)
-        n_chunks = 1
-        for dim, c in zip(dt.dimensions, chunks):
-            n_chunks *= max(1, schema.dim_sizes[dim] // c)
-        cache_size = max(chunk_bytes * min(n_chunks, 521), 64 * 1024 * 1024)
 
         var = ncfile.createVariable(
             dt.name,
@@ -235,7 +230,7 @@ def write_netcdf(
             complevel=1,
             fill_value=False,
         )
-        var.set_var_chunk_cache(cache_size, min(n_chunks, 521), 0.75)
+        var.set_var_chunk_cache(32 * 1024 * 1024, 521, 0.75)
 
     for screen_idx in range(n_screens):
         t0 = time.perf_counter()
@@ -247,16 +242,18 @@ def write_netcdf(
             ncfile.variables[append_dim][screen_idx] = screen_label
 
         for dt_spec in schema.datatypes:
-            shape = tuple(
-                1 if dim == append_dim else schema.dim_sizes[dim]
-                for dim in dt_spec.dimensions
+            shape_no_screen = tuple(
+                schema.dim_sizes[dim]
+                for dim in dt_spec.dimensions if dim != append_dim
             )
-            arr = rng.standard_normal(shape).astype(np.float32)
+            arr = np.empty(shape_no_screen, dtype=np.float32)
+            arr[:] = rng.standard_normal(shape_no_screen)
 
             dim_idx = list(dt_spec.dimensions).index(append_dim)
             slices = [slice(None)] * len(dt_spec.dimensions)
             slices[dim_idx] = screen_idx
-            ncfile.variables[dt_spec.name][tuple(slices)] = arr.squeeze(axis=dim_idx)
+            ncfile.variables[dt_spec.name][tuple(slices)] = arr
+            del arr
             ncfile.sync()
 
         elapsed = time.perf_counter() - t0
