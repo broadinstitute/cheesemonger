@@ -197,6 +197,7 @@ def write_netcdf(
     append_dim = schema.append_dim
 
     ncfile = nc4.Dataset(str(out_path), "w", format="NETCDF4")
+    ncfile.set_fill_off()
 
     append_is_string = coords[append_dim].dtype.kind == "U"
 
@@ -219,20 +220,27 @@ def write_netcdf(
 
     for dt in schema.datatypes:
         chunks = chunk_sizes(dt, schema, chunk_preset)
-        ncfile.createVariable(
+        chunk_bytes = int(np.prod(chunks) * 4)
+        n_chunks = 1
+        for dim, c in zip(dt.dimensions, chunks):
+            n_chunks *= max(1, schema.dim_sizes[dim] // c)
+        cache_size = max(chunk_bytes * min(n_chunks, 521), 64 * 1024 * 1024)
+
+        var = ncfile.createVariable(
             dt.name,
             dt.dtype,
             dt.dimensions,
             chunksizes=chunks,
             zlib=True,
             complevel=1,
+            fill_value=False,
         )
+        var.set_var_chunk_cache(cache_size, min(n_chunks, 521), 0.75)
 
     for screen_idx in range(n_screens):
         t0 = time.perf_counter()
         screen_label = coords[append_dim][screen_idx]
 
-        str_dt = ncfile.variables[append_dim].dtype
         if append_is_string:
             ncfile.variables[append_dim][screen_idx] = np.bytes_(screen_label)
         else:
@@ -249,8 +257,8 @@ def write_netcdf(
             slices = [slice(None)] * len(dt_spec.dimensions)
             slices[dim_idx] = screen_idx
             ncfile.variables[dt_spec.name][tuple(slices)] = arr.squeeze(axis=dim_idx)
+            ncfile.sync()
 
-        ncfile.sync()
         elapsed = time.perf_counter() - t0
         logger.info(
             "Screen %d/%d written to NetCDF (%.1fs)",
