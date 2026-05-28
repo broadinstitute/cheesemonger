@@ -7,6 +7,9 @@ Usage:
 Each screen is written as an independent store (Zarr directory or NetCDF file)
 under a dataset root directory.  A _registry.json file tracks active screens.
 This layout makes screen-level add/delete/replace operations cheap.
+
+Data is written one variable at a time to keep peak memory low (~1.5 GB per
+variable instead of ~20+ GB for all 15 simultaneously).
 """
 
 from __future__ import annotations
@@ -14,16 +17,37 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
 
 import numpy as np
-import xarray as xr
 
 from cheesemonger.schema import DatasetSchema, DatatypeSpec, pesca_schema
 
 logger = logging.getLogger(__name__)
+
+
+def _rss_mb() -> float:
+    """Current RSS of this process in MB (Linux/macOS)."""
+    try:
+        import resource
+        rusage = resource.getrusage(resource.RUSAGE_SELF)
+        if hasattr(rusage, "ru_maxrss"):
+            divisor = 1024 * 1024 if os.uname().sysname == "Darwin" else 1024
+            return rusage.ru_maxrss / divisor
+    except Exception:
+        pass
+    return 0.0
+
+
+def _fill_random_f32(rng: np.random.Generator, shape: tuple[int, ...]) -> np.ndarray:
+    """Generate a float32 random normal array without a full-size float64 temp."""
+    arr = np.empty(shape, dtype=np.float32)
+    for i in range(shape[0]):
+        arr[i] = rng.standard_normal(shape[1:]).astype(np.float32)
+    return arr
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +130,7 @@ def make_coords(schema: DatasetSchema) -> dict[str, np.ndarray]:
         elif dim == "testedperturbation":
             coords[dim] = np.array([f"Gene_{i:05d}" for i in range(size)])
         elif dim == "testedgeneexpression":
-            coords[dim] = np.array([f"Gene_{i:05d}" for i in range(size)])
+            coords[dim] = np.array([f"RGene_{i:05d}" for i in range(size)])
         else:
             coords[dim] = np.array([f"{dim}_{i}" for i in range(size)])
     return coords
@@ -120,49 +144,46 @@ def make_screen_labels(schema: DatasetSchema) -> list[str]:
 # Chunking
 # ---------------------------------------------------------------------------
 
-def chunk_sizes(dt: DatatypeSpec, schema: DatasetSchema) -> tuple[int, ...]:
+CHUNK_PRESETS = {
+    "big": {
+        "testedperturbation": 1000,
+        "testedgeneexpression": 5000,
+        "default": 1000,
+    },
+    "small": {
+        "testedperturbation": 250,
+        "testedgeneexpression": 1000,
+        "default": 250,
+    },
+}
+
+
+def chunk_sizes(
+    dt: DatatypeSpec,
+    schema: DatasetSchema,
+    chunk_preset: str = "big",
+) -> tuple[int, ...]:
     """
     Choose chunk sizes for a datatype shard.
 
     Strategy: chunk size 1 along timepoint (low cardinality, often constrained
     in queries), and larger chunks along testedperturbation/testedgeneexpression
     to give good read performance for series queries.
+
+    Presets:
+        big   — ~20 MB chunks: (1, 1000, 5000). Series query = 4 chunks.
+        small — ~1 MB chunks:  (1, 250, 1000).  Series query = 18 chunks.
     """
+    preset = CHUNK_PRESETS[chunk_preset]
     chunks = []
     for dim in dt.dimensions:
         size = schema.dim_sizes[dim]
         if dim == "timepoint":
             chunks.append(1)
-        elif dim == "testedperturbation":
-            chunks.append(min(1000, size))
-        elif dim == "testedgeneexpression":
-            chunks.append(min(5000, size))
         else:
-            chunks.append(min(1000, size))
+            target = preset.get(dim, preset["default"])
+            chunks.append(min(target, size))
     return tuple(chunks)
-
-
-# ---------------------------------------------------------------------------
-# Build one screen as an xarray Dataset
-# ---------------------------------------------------------------------------
-
-def build_screen_dataset(
-    schema: DatasetSchema,
-    coords: dict[str, np.ndarray],
-    rng: np.random.Generator,
-) -> xr.Dataset:
-    """
-    Build an xr.Dataset containing one screen's worth of data for all
-    datatype shards.  The dataset has no screen dimension — screen is the
-    organizational key, not a data axis.
-    """
-    data_vars: dict[str, tuple] = {}
-    for dt in schema.datatypes:
-        shape = tuple(schema.dim_sizes[dim] for dim in dt.dimensions)
-        arr = rng.standard_normal(shape).astype(np.float32)
-        data_vars[dt.name] = (list(dt.dimensions), arr)
-
-    return xr.Dataset(data_vars, coords=coords)
 
 
 # ---------------------------------------------------------------------------
@@ -170,47 +191,136 @@ def build_screen_dataset(
 # ---------------------------------------------------------------------------
 
 def write_screen_zarr(
-    ds: xr.Dataset,
     schema: DatasetSchema,
+    coords: dict[str, np.ndarray],
     dataset_root: Path,
     screen_label: str,
+    rng: np.random.Generator,
+    chunk_preset: str = "big",
 ) -> Path:
-    """Write a single screen's Dataset to its own Zarr store."""
+    """
+    Write a single screen's data to its own Zarr store, one variable at a time.
+
+    Uses the zarr library directly so that only one variable's data is in
+    memory at any time.  ``_ARRAY_DIMENSIONS`` attributes ensure the store
+    is readable by ``xr.open_zarr()``.
+    """
+    import numcodecs
+    import zarr
+
     store_path = dataset_root / screen_label / "data.zarr"
     if store_path.exists():
         shutil.rmtree(store_path)
     store_path.parent.mkdir(parents=True, exist_ok=True)
 
-    encoding = {
-        dt.name: {"chunks": chunk_sizes(dt, schema)}
-        for dt in schema.datatypes
-    }
-    ds.to_zarr(str(store_path), mode="w", encoding=encoding)
+    root = zarr.open_group(str(store_path), mode="w")
+
+    for dim_name, labels in coords.items():
+        if labels.dtype.kind in ("U", "S"):
+            z_coord = root.create_dataset(
+                dim_name,
+                data=np.array(labels, dtype=object),
+                object_codec=numcodecs.VLenUTF8(),
+                chunks=(len(labels),),
+                overwrite=True,
+            )
+        else:
+            z_coord = root.create_dataset(
+                dim_name,
+                data=labels,
+                chunks=(len(labels),),
+                overwrite=True,
+            )
+        z_coord.attrs["_ARRAY_DIMENSIONS"] = [dim_name]
+
+    for dt in schema.datatypes:
+        full_shape = tuple(schema.dim_sizes[dim] for dim in dt.dimensions)
+        chunks = chunk_sizes(dt, schema, chunk_preset)
+        z_var = root.create_dataset(
+            dt.name,
+            shape=full_shape,
+            dtype=dt.dtype,
+            chunks=chunks,
+            fill_value=0.0,
+            overwrite=True,
+        )
+        z_var.attrs["_ARRAY_DIMENSIONS"] = list(dt.dimensions)
+
+    for dt_i, dt in enumerate(schema.datatypes):
+        full_shape = tuple(schema.dim_sizes[dim] for dim in dt.dimensions)
+        arr = _fill_random_f32(rng, full_shape)
+        root[dt.name][:] = arr
+        del arr
+        logger.debug(
+            "  var %d/%d (%s)  RSS=%.0f MB",
+            dt_i + 1, len(schema.datatypes), dt.name, _rss_mb(),
+        )
+
+    zarr.consolidate_metadata(str(store_path))
     add_screen_to_registry(dataset_root, screen_label)
     return store_path
 
 
 def write_screen_netcdf(
-    ds: xr.Dataset,
     schema: DatasetSchema,
+    coords: dict[str, np.ndarray],
     dataset_root: Path,
     screen_label: str,
+    rng: np.random.Generator,
+    chunk_preset: str = "big",
 ) -> Path:
-    """Write a single screen's Dataset to its own NetCDF file."""
+    """
+    Write a single screen's data to its own NetCDF file, one variable at a time.
+
+    Uses the netCDF4 library directly so that only one variable's data is in
+    memory at any time.
+    """
+    import netCDF4 as nc4
+
     nc_path = dataset_root / screen_label / "data.nc"
     if nc_path.exists():
         nc_path.unlink()
     nc_path.parent.mkdir(parents=True, exist_ok=True)
 
-    encoding = {
-        dt.name: {
-            "chunksizes": chunk_sizes(dt, schema),
-            "zlib": True,
-            "complevel": 1,
-        }
-        for dt in schema.datatypes
-    }
-    ds.to_netcdf(str(nc_path), encoding=encoding)
+    ncfile = nc4.Dataset(str(nc_path), "w", format="NETCDF4")
+    ncfile.set_fill_off()
+
+    for dim_name, labels in coords.items():
+        ncfile.createDimension(dim_name, len(labels))
+        if labels.dtype.kind == "U":
+            max_len = max(len(s) for s in labels)
+            nc_dt = np.dtype(f"S{max_len}")
+            coord_var = ncfile.createVariable(dim_name, nc_dt, (dim_name,))
+            coord_var[:] = np.array(labels, dtype=nc_dt)
+        else:
+            coord_var = ncfile.createVariable(dim_name, labels.dtype, (dim_name,))
+            coord_var[:] = labels
+
+    for dt in schema.datatypes:
+        chunks = chunk_sizes(dt, schema, chunk_preset)
+        var = ncfile.createVariable(
+            dt.name,
+            dt.dtype,
+            dt.dimensions,
+            chunksizes=chunks,
+            zlib=True,
+            complevel=1,
+            fill_value=False,
+        )
+        var.set_var_chunk_cache(32 * 1024 * 1024, 521, 0.75)
+
+    for dt_i, dt in enumerate(schema.datatypes):
+        full_shape = tuple(schema.dim_sizes[dim] for dim in dt.dimensions)
+        arr = _fill_random_f32(rng, full_shape)
+        ncfile.variables[dt.name][:] = arr
+        del arr
+        ncfile.sync()
+        logger.debug(
+            "  var %d/%d (%s)  RSS=%.0f MB",
+            dt_i + 1, len(schema.datatypes), dt.name, _rss_mb(),
+        )
+
+    ncfile.close()
     add_screen_to_registry(dataset_root, screen_label)
     return nc_path
 
@@ -220,9 +330,10 @@ def write_all_screens(
     output_dir: Path,
     fmt: str,
     seed: int = 42,
+    chunk_preset: str = "big",
 ) -> Path:
     """Generate and write all screens for a dataset."""
-    dataset_root = output_dir / schema.name / fmt
+    dataset_root = output_dir / f"chunks_{chunk_preset}" / schema.name / fmt
     if dataset_root.exists():
         shutil.rmtree(dataset_root)
     dataset_root.mkdir(parents=True, exist_ok=True)
@@ -235,12 +346,11 @@ def write_all_screens(
 
     for i, screen_label in enumerate(screen_labels):
         t0 = time.perf_counter()
-        ds = build_screen_dataset(schema, coords, rng)
-        writer(ds, schema, dataset_root, screen_label)
+        writer(schema, coords, dataset_root, screen_label, rng, chunk_preset)
         elapsed = time.perf_counter() - t0
         logger.info(
-            "Screen %d/%d (%s) written as %s (%.1fs)",
-            i + 1, len(screen_labels), screen_label, fmt, elapsed,
+            "Screen %d/%d (%s) written as %s (%.1fs)  RSS=%.0f MB",
+            i + 1, len(screen_labels), screen_label, fmt, elapsed, _rss_mb(),
         )
 
     logger.info("%s dataset written to %s (%d screens)", fmt, dataset_root, len(screen_labels))
@@ -252,8 +362,7 @@ def write_all_screens(
 # ---------------------------------------------------------------------------
 
 SCALE_PRESETS = {
-    "tiny": {"n_screens": 2, "n_timepoints": 2, "n_testedperturbations": 100, "n_testedgeneexpressions": 200},
-    "small": {"n_screens": 3, "n_timepoints": 2, "n_testedperturbations": 1_000, "n_testedgeneexpressions": 2_000},
+    "small": {"n_screens": 2, "n_timepoints": 2, "n_testedperturbations": 100, "n_testedgeneexpressions": 200},
     "medium": {"n_screens": 5, "n_timepoints": 2, "n_testedperturbations": 5_000, "n_testedgeneexpressions": 10_000},
     "single_screen": {"n_screens": 1, "n_timepoints": 2, "n_testedperturbations": 10_000, "n_testedgeneexpressions": 18_000},
     "full": {"n_screens": 30, "n_timepoints": 2, "n_testedperturbations": 10_000, "n_testedgeneexpressions": 18_000},
@@ -294,6 +403,13 @@ def main():
         default=Path("data/simulated"),
         help="Output directory (default: data/simulated)",
     )
+    parser.add_argument(
+        "--chunk-preset",
+        choices=list(CHUNK_PRESETS.keys()),
+        default="big",
+        help="Chunk size preset (default: big). "
+             "big=~20MB chunks (1,1000,5000), small=~1MB chunks (1,250,1000)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -305,11 +421,17 @@ def main():
 
     preset = SCALE_PRESETS[args.scale]
     schema = pesca_schema(**preset)
+    chunk_preset = args.chunk_preset
+
+    sample_chunks = chunk_sizes(schema.datatypes[0], schema, chunk_preset)
+    chunk_mb = np.prod(sample_chunks) * 4 / (1024 ** 2)
 
     est_gb = _estimate_size(schema)
     logger.info(
-        "Scale=%s  dims=%s  screens=%d  estimated uncompressed=%.2f GB",
+        "Scale=%s  chunks=%s (~%.1f MB)  dims=%s  screens=%d  estimated uncompressed=%.2f GB",
         args.scale,
+        sample_chunks,
+        chunk_mb,
         dict(schema.dim_sizes),
         schema.n_screens,
         est_gb,
@@ -317,12 +439,12 @@ def main():
 
     if args.format in ("zarr", "both"):
         t0 = time.perf_counter()
-        path = write_all_screens(schema, args.output_dir, "zarr", seed=args.seed)
+        path = write_all_screens(schema, args.output_dir, "zarr", seed=args.seed, chunk_preset=chunk_preset)
         logger.info("Zarr complete in %.1fs -> %s", time.perf_counter() - t0, path)
 
     if args.format in ("netcdf", "both"):
         t0 = time.perf_counter()
-        path = write_all_screens(schema, args.output_dir, "netcdf", seed=args.seed)
+        path = write_all_screens(schema, args.output_dir, "netcdf", seed=args.seed, chunk_preset=chunk_preset)
         logger.info("NetCDF complete in %.1fs -> %s", time.perf_counter() - t0, path)
 
 
