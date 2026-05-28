@@ -148,22 +148,43 @@ def build_query_specs(
 # Benchmark runner
 # ---------------------------------------------------------------------------
 
+def _randomize_constraints(
+    spec: QuerySpec,
+    perturbations: np.ndarray,
+    rng: np.random.Generator,
+) -> dict:
+    """Return a copy of spec.constraints with a random perturbation.
+
+    Series queries fix testedperturbation — randomising it ensures each
+    iteration reads different chunks, preventing artificial page-cache hits.
+    Aggregation queries don't fix perturbation, so they pass through unchanged.
+    """
+    if "testedperturbation" not in spec.constraints:
+        return spec.constraints
+    return {**spec.constraints, "testedperturbation": str(rng.choice(perturbations))}
+
+
 def run_one_query(
     dataset_root: Path,
     fmt: str,
     screen: str,
     spec: QuerySpec,
+    perturbations: np.ndarray,
     n_iterations: int,
     warmup: int = 1,
+    seed: int = 42,
 ) -> BenchmarkResult:
-    """Run a single query spec multiple times and collect latencies."""
+    """Run a single query spec multiple times with randomised perturbations."""
+    rng = np.random.default_rng(seed)
+
     for _ in range(warmup):
+        constraints = _randomize_constraints(spec, perturbations, rng)
         get_vector(
             dataset_root=dataset_root,
             fmt=fmt,
             screen=screen,
             datatype=spec.datatype,
-            constraints=spec.constraints,
+            constraints=constraints,
             aggregate=spec.aggregate,
             aggregate_over=spec.aggregate_over,
             aggregate_threshold=spec.aggregate_threshold,
@@ -174,13 +195,14 @@ def run_one_query(
     result_shape: tuple[int, ...] = ()
 
     for _ in range(n_iterations):
+        constraints = _randomize_constraints(spec, perturbations, rng)
         t0 = time.perf_counter()
         result = get_vector(
             dataset_root=dataset_root,
             fmt=fmt,
             screen=screen,
             datatype=spec.datatype,
-            constraints=spec.constraints,
+            constraints=constraints,
             aggregate=spec.aggregate,
             aggregate_over=spec.aggregate_over,
             aggregate_threshold=spec.aggregate_threshold,
@@ -204,7 +226,12 @@ def run_benchmark(
     n_iterations: int = 10,
     warmup: int = 1,
 ) -> list[BenchmarkResult]:
-    """Run all benchmark queries against a dataset."""
+    """Run all benchmark queries against a dataset.
+
+    Each iteration uses a randomly chosen perturbation so that series
+    queries hit different chunks each time, preventing artificial
+    page-cache inflation.
+    """
     screens = list_screens(dataset_root)
     if not screens:
         raise RuntimeError(f"No screens found in {dataset_root}")
@@ -221,8 +248,8 @@ def run_benchmark(
     perturbation = str(perturbations[len(perturbations) // 2])
 
     logger.info(
-        "Query params: screen=%s, timepoint=%s, perturbation=%s",
-        screen, timepoint, perturbation,
+        "Query params: screen=%s, timepoint=%s, perturbation=random(%d labels)",
+        screen, timepoint, len(perturbations),
     )
 
     specs = build_query_specs(timepoint, perturbation)
@@ -230,7 +257,9 @@ def run_benchmark(
 
     for spec in specs:
         logger.info("Running: %s (%d warmup + %d measured)", spec.name, warmup, n_iterations)
-        result = run_one_query(dataset_root, fmt, screen, spec, n_iterations, warmup)
+        result = run_one_query(
+            dataset_root, fmt, screen, spec, perturbations, n_iterations, warmup,
+        )
         logger.info("  %s", result.summary_line())
         results.append(result)
 
@@ -343,8 +372,8 @@ def run_concurrent_benchmark(
     Fire queries from multiple threads and measure throughput + latency.
 
     For each concurrency level, submits *queries_per_level* queries drawn
-    round-robin from the series query specs.  Each thread opens its own
-    store handle (mimicking independent API requests).
+    round-robin from the series query specs.  Each query uses a different
+    random perturbation to prevent artificial cache hits.
     """
     screens = list_screens(dataset_root)
     if not screens:
@@ -362,12 +391,25 @@ def run_concurrent_benchmark(
     all_specs = build_query_specs(timepoint, perturbation)
     series_specs = [s for s in all_specs if s.name.startswith("series/")]
 
+    rng = np.random.default_rng(99)
     results: list[ConcurrentResult] = []
 
     for n_threads in concurrency_levels:
-        work = [series_specs[i % len(series_specs)] for i in range(queries_per_level)]
+        work: list[QuerySpec] = []
+        for i in range(queries_per_level):
+            base = series_specs[i % len(series_specs)]
+            rand_pert = str(rng.choice(perturbations))
+            work.append(QuerySpec(
+                name=base.name,
+                datatype=base.datatype,
+                constraints={**base.constraints, "testedperturbation": rand_pert},
+                aggregate=base.aggregate,
+                aggregate_over=base.aggregate_over,
+                aggregate_threshold=base.aggregate_threshold,
+                diagonal=base.diagonal,
+            ))
 
-        _timed_query(dataset_root, fmt, screen, series_specs[0])
+        _timed_query(dataset_root, fmt, screen, work[0])
 
         latencies: list[float] = []
         wall_start = time.perf_counter()
