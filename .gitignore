@@ -43,3 +43,4 @@ data/
 
 # uv lock file is committed, but ignore local cache
 .uv/
+*.csv
