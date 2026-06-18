@@ -1,3 +1,7 @@
+# TODO: Validate selection labels against schema coordinates in the router
+# (before calling the engine) to give clean 422s with useful messages,
+# rather than relying on xarray KeyError strings.
+
 from __future__ import annotations
 
 from typing import Annotated
@@ -53,6 +57,12 @@ def query_data(
         if query.aggregate.type == "count_lt" and query.aggregate.threshold is None:
             raise HTTPException(
                 status_code=422, detail="count_lt requires a threshold",
+            )
+        selected_dims = {s.dimension for s in query.select}
+        if query.aggregate.over in selected_dims:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Cannot aggregate over '{query.aggregate.over}': it is fixed by select",
             )
 
     # Validate that the selected block exists

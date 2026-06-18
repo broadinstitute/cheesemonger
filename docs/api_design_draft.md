@@ -780,12 +780,17 @@ Estimated latency: **~300 ms** (dominated by the single slowest query, since all
 
 | Status | Condition |
 |--------|-----------|
-| `400 Bad Request` | Missing required fields, unknown datatype, unknown dimension in `select` |
+| `400 Bad Request` | Unknown datatype, unknown dimension in `select` |
 | `404 Not Found` | Dataset or block not found |
-| `422 Unprocessable Entity` | Invalid selection values (e.g., label doesn't exist), `count_lt` without `threshold`, `aggregate.over` references a fully-fixed dimension |
+| `422 Unprocessable Entity` | Invalid selection values (e.g., label doesn't exist), `count_lt` without `threshold`, `aggregate.over` references a fully-fixed dimension, malformed request body |
+
+> **Note:** FastAPI/Pydantic return `422 Unprocessable Entity` (not `400`) for request body validation errors (missing required fields, wrong types). This is standard FastAPI behavior.
 
 ---
 
 ## Future considerations
 
 - Pre-computed aggregations and caching for aggregated queries.
+- Vectorized diagonal extraction for better latency (currently loops per label).
+- Query engine integration tests against real xarray-exported Zarr stores.
+- Router-level label validation before calling `.sel()` for cleaner error messages.

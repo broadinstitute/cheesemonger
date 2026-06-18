@@ -74,17 +74,20 @@ def get_dataset(
     return detail
 
 
-@router.delete("/{dataset}", response_model=DatasetDeleted)
+@router.delete(
+    "/{dataset}",
+    response_model=DatasetDeleted,
+    responses={409: {"model": DatasetNotEmpty, "description": "Dataset still has blocks"}},
+)
 def delete_dataset(
     dataset: str,
     ds: Annotated[DatasetService, Depends(get_dataset_service)],
-) -> DatasetDeleted:
+) -> DatasetDeleted | JSONResponse:
     if not ds.exists(dataset):
         raise HTTPException(status_code=404, detail="Dataset does not exist")
 
     blocks = ds.list_block_names(dataset)
     if blocks:
-        # Return the structured error body directly, not wrapped in {"detail": ...}
         body = DatasetNotEmpty(
             message=f"Dataset '{dataset}' still has {len(blocks)} block(s). Delete all blocks before deleting the dataset.",
             blocks=blocks,

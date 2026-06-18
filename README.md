@@ -1,6 +1,32 @@
 # Cheesemonger
 
-Low-latency REST API for multi-dimensional perturb-seq data. Serves xarray-exported Zarr stores from Hyperdisk with sub-second query latency.
+Low-latency REST API for multi-dimensional perturb-seq data. Serves xarray-exported Zarr stores from Hyperdisk.
+
+Cheesemonger is a **layered FastAPI application** with three layers:
+
+```
+HTTP Request
+    │
+    ▼
+┌──────────────────────────────────┐
+│  api/  (Routers)                 │  HTTP concerns: validation, status codes, DI
+│  Uses Depends() to get services  │
+└────────────┬─────────────────────┘
+             │ calls
+             ▼
+┌──────────────────────────────────┐
+│  services/  (Business logic)     │  Disk I/O, xarray reads, Taiga client
+│  No HTTP concepts here           │
+└────────────┬─────────────────────┘
+             │ reads/writes
+             ▼
+┌──────────────────────────────────┐
+│  schemas/  (Pydantic models)     │  Data shapes for requests and responses
+│  Shared across layers            │
+└──────────────────────────────────┘
+```
+
+The key rule: **routers never touch disk directly**. They validate the HTTP request, call a service, and return the result. Services know nothing about HTTP (no `HTTPException`, no status codes).
 
 ## Quick start
 

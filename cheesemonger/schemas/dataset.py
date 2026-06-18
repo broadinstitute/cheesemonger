@@ -10,6 +10,7 @@ class DatasetIn(BaseModel):
     last_dimension: str
     dimensions: list[Dimension]
     datatypes: list[DatatypeSpec]
+    # TODO: Default should match docs: big chunks (1000, 5000). Currently empty. 
     chunk_shape: list[ChunkDim] = []
 
 

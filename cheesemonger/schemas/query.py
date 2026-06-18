@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from pydantic import BaseModel
 
@@ -25,7 +25,7 @@ class QueryIn(BaseModel):
 
 class IndexLevel(BaseModel):
     dimension: str
-    labels: list[int | str]
+    labels: Sequence[int | str]
 
 
 class QueryOut(BaseModel):

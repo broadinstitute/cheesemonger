@@ -44,7 +44,8 @@ class GeneMappingService:
 
         entries: dict[str, str] = {}
         if df is not None and not df.empty:
-            if df.index.name and "entrez" in df.index.name.lower():
+            index_name = df.index.name
+            if isinstance(index_name, str) and "entrez" in index_name.lower():
                 for idx, row in df.iterrows():
                     symbol = row.iloc[0] if len(row) > 0 else str(idx)
                     entries[str(idx)] = str(symbol)

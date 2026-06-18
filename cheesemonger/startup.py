@@ -1,8 +1,8 @@
 """App factory — creates and configures the FastAPI application.
 
-Called once from main.py. Registers all routers and loads the gene mapping
-from Taiga at startup.
-TODO: Add a way to mount the taiga token
+Called once from main.py. Registers all routers and creates all
+singleton services (stored on app.state so they're shared across
+requests via FastAPI dependencies).
 """
 
 from importlib import metadata
@@ -15,7 +15,9 @@ from .api.gene_mappings import router as gene_mappings_router
 from .api.health import router as health_router
 from .api.query import router as query_router
 from .config import Settings
+from .services.dataset import DatasetService
 from .services.gene_mappings import GeneMappingService
+from .services.query import QueryService
 
 _PACKAGE_NAME = "cheesemonger"
 
@@ -37,8 +39,14 @@ def create_app(settings: Settings) -> FastAPI:
         version=_VERSION,
     )
 
-    # Load gene mapping at startup — stored on app.state so it's shared
-    # across all requests via the get_gene_mapping_service dependency.
+    # --- Singleton services (created once, shared across all requests) ---
+
+    app.state.dataset_service = DatasetService(settings.data_dir)
+
+    app.state.query_service = QueryService(
+        thread_pool_size=settings.thread_pool_size,
+    )
+
     if settings.taiga_gene_mapping_id:
         gene_mapping_svc = GeneMappingService.from_taiga(
             settings.taiga_gene_mapping_id,
@@ -47,6 +55,8 @@ def create_app(settings: Settings) -> FastAPI:
     else:
         gene_mapping_svc = GeneMappingService.empty()
     app.state.gene_mapping_service = gene_mapping_svc
+
+    # --- Routers ---
 
     if api_prefix:
         root_router = APIRouter(prefix=api_prefix)

@@ -33,68 +33,51 @@ class QueryError(Exception):
 def _numpy_to_json(arr: np.ndarray) -> list | float | int | None:
     """Convert a numpy array to JSON-serializable Python types.
 
-    Handles NaN → None, float/int coercion, and nested list reshaping
-    for N-dimensional arrays.
+    Uses arr.tolist() for fast conversion, then replaces NaN with None.
     """
     if arr.ndim == 0:
         val = arr.item()
-        if np.isnan(val):
+        if isinstance(val, float) and np.isnan(val):
             return None
         return val
 
-    result = []
-    for item in arr.flat:
-        if np.isnan(item):
-            result.append(None)
-        else:
-            result.append(float(item) if isinstance(item, (np.floating, float)) else int(item))
+    if np.issubdtype(arr.dtype, np.floating) and np.any(np.isnan(arr)):
+        obj_arr = arr.astype(object)
+        obj_arr[np.isnan(arr)] = None
+        return obj_arr.tolist()
 
-    if arr.ndim == 1:
-        return result
-
-    flat_iter = iter(result)
-
-    def _reshape(shape: tuple) -> list:
-        if len(shape) == 1:
-            return [next(flat_iter) for _ in range(shape[0])]
-        return [_reshape(shape[1:]) for _ in range(shape[0])]
-
-    return _reshape(tuple(arr.shape))
+    return arr.tolist()
 
 
-def _read_single_block_datatype(
-    block_path: Path,
+def _read_datatype_from_ds(
+    ds: xr.Dataset,
     datatype: str,
     array_selections: dict[str, int | str],
     aggregate: AggregateSpec | None,
     diagonal: tuple[str, str] | None,
 ) -> np.ndarray:
-    """Read one datatype from one block, applying selections and aggregation.
+    """Read one datatype from an already-opened xarray Dataset.
 
-    Opens the block as an xarray Dataset (written by xarray.to_zarr()),
-    selects the datatype variable, applies .sel() for label-based indexing,
-    and optionally aggregates.
+    Selects the datatype variable, applies .sel() for label-based indexing,
+    and optionally aggregates. The caller is responsible for opening and
+    closing the Dataset.
     """
-    ds = xr.open_zarr(str(block_path))
-
     if datatype not in ds:
-        raise QueryError(f"Datatype '{datatype}' not found in block at {block_path}")
+        raise QueryError(f"Datatype '{datatype}' not found in block")
 
     da = ds[datatype]
 
     if diagonal:
         return _read_diagonal(da, array_selections, diagonal)
 
-    # Apply label-based selections — xarray handles the coordinate lookup
     try:
         if array_selections:
-            da = da.sel(**array_selections)
+            da = da.sel(array_selections)
     except KeyError as e:
         raise QueryError(f"Selection error: {e}")
 
     arr = da.values
 
-    # Within-block aggregation: collapse a free dimension
     if aggregate and aggregate.over in da.dims:
         agg_axis = list(da.dims).index(aggregate.over)
         if aggregate.type == "mean":
@@ -117,11 +100,14 @@ def _read_diagonal(
     For each label that exists in both diagonal dimensions, reads the value
     at [dim_a=label, dim_b=label] (plus any other fixed selections).
     """
+    # TODO(perf): Replace the per-label loop with xarray vectorized pointwise
+    # selection: da.sel(dim_a=xr.DataArray(common), dim_b=xr.DataArray(common))
+    # The current loop does ~8,500 individual .sel() calls for a typical
+    # diagonal query and will be slower.
     dim_a, dim_b = diagonal
 
-    # Apply any non-diagonal selections first
     if array_selections:
-        da = da.sel(**array_selections)
+        da = da.sel(array_selections)
 
     labels_a = [str(l) for l in da.coords[dim_a].values]
     labels_b = [str(l) for l in da.coords[dim_b].values]
@@ -129,7 +115,7 @@ def _read_diagonal(
 
     values = []
     for label in common:
-        val = da.sel(**{dim_a: label, dim_b: label}).values
+        val = da.sel({dim_a: label, dim_b: label}).values
         values.append(float(val) if np.ndim(val) == 0 else float(val.flat[0]))
 
     return np.array(values, dtype=np.float32)
@@ -185,14 +171,18 @@ class QueryService:
 
         def _read_block(block_name: str) -> tuple[str, dict[str, np.ndarray]]:
             block_path = get_block_path(block_name)
-            results = {}
-            for dt in datatypes:
-                arr = _read_single_block_datatype(
-                    block_path, dt, array_selections,
-                    query.aggregate if within_block_agg else None,
-                    query.diagonal,
-                )
-                results[dt] = arr
+            ds = xr.open_zarr(str(block_path))
+            try:
+                results = {}
+                for dt in datatypes:
+                    arr = _read_datatype_from_ds(
+                        ds, dt, array_selections,
+                        query.aggregate if within_block_agg else None,
+                        query.diagonal,
+                    )
+                    results[dt] = arr
+            finally:
+                ds.close()
             return block_name, results
 
         if len(target_blocks) == 1:
@@ -212,6 +202,7 @@ class QueryService:
                 break
 
         if agg_over_last_dim:
+            assert query.aggregate is not None  # guaranteed by agg_over_last_dim
             return self._aggregate_across_blocks(
                 all_results, target_blocks, datatypes, schema,
                 query.aggregate, array_selections, query.diagonal,
@@ -255,11 +246,11 @@ class QueryService:
             if aggregate.type == "mean":
                 agg_result = np.nanmean(stacked, axis=0)
             elif aggregate.type == "count_lt":
-                per_block_counts = np.stack([
-                    np.sum(all_results[b][dt] < aggregate.threshold)
+                stacked_mask = np.stack([
+                    all_results[b][dt] < aggregate.threshold
                     for b in target_blocks
                 ])
-                agg_result = np.sum(per_block_counts, axis=0)
+                agg_result = np.sum(stacked_mask, axis=0)
             else:
                 raise QueryError(f"Unknown aggregation type: {aggregate.type}")
             data[dt] = _numpy_to_json(agg_result)
