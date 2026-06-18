@@ -29,11 +29,12 @@ graph TB
             end
         end
 
-        subgraph "Each block (e.g. SW620/)"
-            Z1[ZScore/ — Zarr array]
-            Z2[L2FC/ — Zarr array]
-            Z3[FDR/ — Zarr array]
+        subgraph "Each block (e.g. SW620/) — xarray Dataset as Zarr"
+            Z1[ZScore/ — data variable]
+            Z2[L2FC/ — data variable]
+            Z3[FDR/ — data variable]
             ZN[... 12 more datatypes]
+            ZC[timepoint/ testedperturbation/<br/>testedgeneexpression/<br/>— coordinate arrays]
         end
     end
 
@@ -56,6 +57,7 @@ graph TB
     SW --- Z2
     SW --- Z3
     SW --- ZN
+    SW --- ZC
 
     style API fill:#4a9eff,color:#fff
     style TP fill:#6cb4ee,color:#fff
@@ -69,19 +71,20 @@ graph TB
     style Z2 fill:#264653,color:#fff
     style Z3 fill:#264653,color:#fff
     style ZN fill:#264653,color:#fff
+    style ZC fill:#457b9d,color:#fff
 ```
 
 ### Components
 
 | Component | Role |
 |-----------|------|
-| **FastAPI Server** | Serves REST API, validates requests via Pydantic, routes queries to Zarr stores |
+| **FastAPI Server** | Serves REST API, validates requests via Pydantic, reads blocks via `xr.open_zarr()` |
 | **ThreadPool (4 workers)** | Parallelizes multi-block and multi-datatype reads within a single request |
 | **Gene Mapping Cache** | In-memory entrez ↔ symbol mapping, loaded from Taiga at startup |
 | **Hyperdisk** | High-performance block storage mounted at `/mnt/data/`. Stores all Zarr data. |
-| **Block (Zarr store)** | One folder per screen. Contains independent Zarr arrays for each datatype. |
+| **Block (xarray Dataset as Zarr)** | One folder per screen. Contains an xarray Dataset with data variables (datatypes) and coordinate arrays (dimension labels). Written by `xarray.Dataset.to_zarr()`. |
 | **Taiga** | External data platform. Source of the gene mapping file. Accessed via `taigapy`. |
-| **Admin CLI** | Loads new blocks from source Zarr stores. Not part of the REST API. |
+| **Admin CLI** | Loads new blocks from source xarray-exported Zarr stores. Validates and copies via `xr.open_zarr()` / `.to_zarr()`. Not part of the REST API. |
 
 ---
 
@@ -110,10 +113,10 @@ sequenceDiagram
     A->>R: Identify last_dimension<br/>→ screen = "SW620"
     R-->>A: Open 1 block
 
-    A->>Z: Open /mnt/data/pesca/blocks/SW620/ZScore/
-    A->>Z: .sel(timepoint=4, testedperturbation="4193")
-    Note right of Z: Reads 4 chunks<br/>(4 × 5000 genes = 18,000)
-    Z-->>A: numpy array (18000,)
+    A->>Z: ds = xr.open_zarr(".../blocks/SW620/")
+    A->>Z: ds["ZScore"].sel(timepoint=4, testedperturbation="4193")
+    Note right of Z: xarray resolves labels to<br/>chunk indices, reads 4 chunks<br/>(4 × 5000 genes = 18,000)
+    Z-->>A: .values → numpy array (18000,)
 
     A-->>C: 200 OK
     Note left of A: {"blocks": ["SW620"],<br/>"shape": [18000],<br/>"index": [{dim: "testedgeneexpression", ...}],<br/>"data": {"ZScore": [0.48, -1.2, ...]}}
@@ -168,25 +171,20 @@ sequenceDiagram
     participant ADMIN as Admin
     participant CLI as cheesemonger CLI
     participant DISK as Hyperdisk
-    participant SRC as Source Zarr<br/>(GCS / local)
+    participant SRC as Source xarray Zarr<br/>(GCS / local)
 
     ADMIN->>CLI: cheesemonger load<br/>--dataset pesca<br/>--block MCF7<br/>--source gs://lab-results/.../
 
     CLI->>DISK: Read schema.json
     DISK-->>CLI: Schema (dimensions, datatypes, chunk shape)
 
-    CLI->>SRC: Open source Zarr store
-    SRC-->>CLI: Source arrays
+    CLI->>SRC: ds = xr.open_zarr(source)
+    SRC-->>CLI: xarray Dataset<br/>(data vars + coordinates)
 
-    CLI->>CLI: Validate source against schema<br/>(dimensions, shapes, labels)
+    CLI->>CLI: Validate ds against schema<br/>(dimensions, coords, data variables)
 
-    loop For each datatype (15 total)
-        CLI->>SRC: Read source array
-        CLI->>DISK: Write to /mnt/data/pesca/blocks/MCF7/{datatype}/
-        Note right of DISK: Copy/rechunk into<br/>target chunk layout
-    end
-
-    CLI->>DISK: Register block in metadata
+    CLI->>DISK: ds.to_zarr(/mnt/data/pesca/blocks/MCF7/)
+    Note right of DISK: Writes data variables,<br/>coordinate arrays, and<br/>xarray metadata
 
     CLI-->>ADMIN: ✓ Block MCF7 loaded
 ```

@@ -1,0 +1,64 @@
+"""App factory — creates and configures the FastAPI application.
+
+Called once from main.py. Registers all routers and loads the gene mapping
+from Taiga at startup.
+TODO: Add a way to mount the taiga token
+"""
+
+from importlib import metadata
+
+from fastapi import APIRouter, FastAPI
+
+from .api.blocks import router as blocks_router
+from .api.datasets import router as datasets_router
+from .api.gene_mappings import router as gene_mappings_router
+from .api.health import router as health_router
+from .api.query import router as query_router
+from .config import Settings
+from .services.gene_mappings import GeneMappingService
+
+_PACKAGE_NAME = "cheesemonger"
+
+try:
+    _VERSION = metadata.version(_PACKAGE_NAME)
+except metadata.PackageNotFoundError:
+    _VERSION = "0.0.0"
+
+
+def create_app(settings: Settings) -> FastAPI:
+    api_prefix = settings.api_prefix
+
+    app = FastAPI(
+        title=_PACKAGE_NAME,
+        openapi_url=f"{api_prefix}/openapi.json",
+        docs_url=f"{api_prefix}/docs",
+        redoc_url=f"{api_prefix}/redoc",
+        swagger_ui_oauth2_redirect_url=f"{api_prefix}/docs/oauth2-redirect",
+        version=_VERSION,
+    )
+
+    # Load gene mapping at startup — stored on app.state so it's shared
+    # across all requests via the get_gene_mapping_service dependency.
+    if settings.taiga_gene_mapping_id:
+        gene_mapping_svc = GeneMappingService.from_taiga(
+            settings.taiga_gene_mapping_id,
+            token_path=settings.taiga_token_path,
+        )
+    else:
+        gene_mapping_svc = GeneMappingService.empty()
+    app.state.gene_mapping_service = gene_mapping_svc
+
+    if api_prefix:
+        root_router = APIRouter(prefix=api_prefix)
+    else:
+        root_router = APIRouter()
+
+    root_router.include_router(health_router)
+    root_router.include_router(datasets_router)
+    root_router.include_router(blocks_router)
+    root_router.include_router(gene_mappings_router)
+    root_router.include_router(query_router)
+
+    app.include_router(root_router)
+
+    return app

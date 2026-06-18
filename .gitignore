@@ -15,3 +15,12 @@ __pycache__/
 
 # CSV files
 *.csv
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+
+# Data directory (Zarr stores)
+/data/

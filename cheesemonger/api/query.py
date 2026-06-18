@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from cheesemonger.schemas.query import QueryIn, QueryOut
+from cheesemonger.services.dataset import DatasetService
+from cheesemonger.services.query import QueryError, QueryService
+
+from .deps import get_dataset_service, get_query_service
+
+router = APIRouter(prefix="/datasets/{dataset}", tags=["query"])
+
+
+@router.post("/query", response_model=QueryOut)
+def query_data(
+    dataset: str,
+    query: QueryIn,
+    ds: Annotated[DatasetService, Depends(get_dataset_service)],
+    qs: Annotated[QueryService, Depends(get_query_service)],
+) -> QueryOut:
+    schema = ds.get_schema(dataset)
+    if schema is None:
+        raise HTTPException(status_code=404, detail="Dataset does not exist")
+
+    last_dim = schema["last_dimension"]
+    dim_names = {d["name"] for d in schema["dimensions"]}
+    dt_names = {d["name"] for d in schema["datatypes"]}
+    valid_dims = dim_names | {last_dim}
+
+    # Validate datatypes
+    datatypes = query.datatype if isinstance(query.datatype, list) else [query.datatype]
+    for dt in datatypes:
+        if dt not in dt_names:
+            raise HTTPException(status_code=400, detail=f"Unknown datatype: {dt}")
+
+    # Validate dimension names in select
+    for sel in query.select:
+        if sel.dimension not in valid_dims:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown dimension in select: {sel.dimension}",
+            )
+
+    # Validate aggregate spec
+    if query.aggregate:
+        if query.aggregate.over not in valid_dims:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown dimension in aggregate.over: {query.aggregate.over}",
+            )
+        if query.aggregate.type == "count_lt" and query.aggregate.threshold is None:
+            raise HTTPException(
+                status_code=422, detail="count_lt requires a threshold",
+            )
+
+    # Validate that the selected block exists
+    block_names = ds.list_block_names(dataset)
+    block_sel = next((s for s in query.select if s.dimension == last_dim), None)
+    if block_sel:
+        block_name = str(block_sel.value)
+        if block_name not in block_names:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Block '{block_name}' not found in dataset '{dataset}'",
+            )
+
+    try:
+        return qs.execute(
+            query=query,
+            schema=schema,
+            block_names=block_names,
+            get_block_path=lambda b: ds.get_block_zarr_path(dataset, b),
+        )
+    except QueryError as e:
+        raise HTTPException(status_code=422, detail=str(e))

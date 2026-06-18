@@ -61,7 +61,9 @@ The schema is immutable after creation. Blocks are added incrementally via CLI. 
 
 ### Source data
 
-The raw data arrives as Zarr stores (one per screen). Each store contains 15 datatype arrays with the following index structure:
+The raw data arrives as **xarray-exported Zarr stores** (one per screen), written via `xarray.Dataset.to_zarr()`. Each store contains 15 datatype arrays as data variables, plus coordinate arrays that encode dimension labels within the Zarr store itself. This is important because raw Zarr has no concept of named coordinates — xarray embeds them using its own conventions (stored in `.zattrs` metadata files).
+
+Each store has the following index structure:
 
 | Index Column | Dimension | Cardinality | Description |
 |-------------|-----------|-------------|-------------|
@@ -72,30 +74,51 @@ The raw data arrives as Zarr stores (one per screen). Each store contains 15 dat
 
 Each coordinate tuple `(screen, timepoint, testedperturbation, testedgeneexpression)` has values for all 15 datatypes. The full dataset has `30 × 2 × 10,000 × 18,000 = 10.8 billion` measurements per datatype.
 
-Each dimension has a 1-D coordinate array stored alongside the data. The coordinate array maps position → label and enables name-based lookups.
+Each dimension has a 1-D coordinate array stored alongside the data. Because the stores are xarray-exported, coordinates are embedded in the Zarr store itself (as separate Zarr arrays with xarray metadata in `.zattrs`). The server reads them via `xarray.open_zarr()`, which reconstructs the full labeled Dataset with named dimensions and coordinates automatically.
 
 ### On-disk layout (separate-block model)
+
+Each block is an xarray Dataset exported as Zarr. The coordinate arrays (`timepoint/`, `testedperturbation/`, etc.) are written by xarray alongside the data variables.
 
 ```
 /mnt/data/pesca/
   schema.json                    ← dataset schema (dimensions, datatypes, chunk shape)
   blocks/
-    SW620/                       ← one block = one screen
-      ZScore/                    ← 3-D Zarr array (timepoint, testedperturbation, testedgeneexpression)
+    SW620/                       ← one block = one xarray Dataset as Zarr
+      .zattrs                    ← xarray metadata (dimension names, conventions)
+      .zgroup                    ← Zarr group marker
+      .zmetadata                 ← consolidated metadata (optional, for faster open)
+      ZScore/                    ← data variable — 3-D Zarr array
+        .zarray                  ← Zarr array metadata (shape, chunks, dtype)
+        .zattrs                  ← xarray attrs (dimension names: [timepoint, ...])
         0.0.0                    ← chunk files
         0.0.1
         ...
-      L2FC/
+      L2FC/                      ← data variable
+        ...
       FDR/
       ...
+      timepoint/                 ← coordinate array written by xarray
+        .zarray
+        .zattrs
+        0
+      testedperturbation/        ← coordinate array (10,000 entrez IDs)
+        .zarray
+        .zattrs
+        0
+      testedgeneexpression/      ← coordinate array (18,000 entrez IDs)
+        .zarray
+        .zattrs
+        0
     HT29/
-      ZScore/
       ...
     A549/
       ...
 ```
 
 The `blocks/` subdirectory mirrors the API path structure: `DELETE /datasets/pesca/blocks/SW620` maps directly to `rm -rf /mnt/data/pesca/blocks/SW620/`.
+
+**Why xarray-exported Zarr?** Raw Zarr has no concept of named coordinates. When Bella writes `ds.to_zarr(...)`, xarray embeds coordinate labels as separate Zarr arrays and records dimension names in `.zattrs`. When the server reads with `xr.open_zarr(...)`, it reconstructs the full labeled Dataset. This enables `.sel(timepoint=4, testedperturbation="4193")` for label-based indexing instead of manual integer-index lookups.
 
 ---
 

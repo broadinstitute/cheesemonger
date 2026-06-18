@@ -1,8 +1,8 @@
 # Cheesemonger REST API Design
 
 **Draft Version:** v1
-**Stack:** FastAPI + Pydantic, Zarr on Hyperdisk (big chunks)
-**Storage model:** Separate-block (each block is an independent Zarr store; block is not an array dimension)
+**Stack:** FastAPI + Pydantic + xarray, Zarr on Hyperdisk (big chunks)
+**Storage model:** Separate-block (each block is an independent xarray Dataset stored as Zarr; block is not an array dimension)
 
 ---
 
