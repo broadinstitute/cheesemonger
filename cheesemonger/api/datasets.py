@@ -90,7 +90,10 @@ def delete_dataset(
     blocks = ds.list_block_names(dataset)
     if blocks:
         body = DatasetNotEmpty(
-            message=f"Dataset '{dataset}' still has {len(blocks)} block(s). Delete all blocks before deleting the dataset.",
+            message=(
+                f"Dataset '{dataset}' still has {len(blocks)} block(s). "
+                "Delete all blocks before deleting the dataset."
+            ),
             blocks=blocks,
         )
         return JSONResponse(status_code=409, content=body.model_dump())

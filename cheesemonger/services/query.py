@@ -74,7 +74,7 @@ def _read_datatype_from_ds(
         if array_selections:
             da = da.sel(array_selections)
     except KeyError as e:
-        raise QueryError(f"Selection error: {e}")
+        raise QueryError(f"Selection error: {e}") from e
 
     arr = da.values
 
@@ -109,8 +109,8 @@ def _read_diagonal(
     if array_selections:
         da = da.sel(array_selections)
 
-    labels_a = [str(l) for l in da.coords[dim_a].values]
-    labels_b = [str(l) for l in da.coords[dim_b].values]
+    labels_a = [str(lbl) for lbl in da.coords[dim_a].values]
+    labels_b = [str(lbl) for lbl in da.coords[dim_b].values]
     common = sorted(set(labels_a) & set(labels_b))
 
     values = []
@@ -365,7 +365,7 @@ class QueryService:
             dim_a, dim_b = diagonal
             labels_a = self._get_dim_labels(schema, dim_a)
             labels_b = self._get_dim_labels(schema, dim_b)
-            common = sorted(set(str(l) for l in labels_a) & set(str(l) for l in labels_b))
+            common = sorted({str(lbl) for lbl in labels_a} & {str(lbl) for lbl in labels_b})
             return [IndexLevel(dimension="label", labels=common)]
 
         agg_dim = aggregate.over if aggregate else None

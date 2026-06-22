@@ -7,8 +7,14 @@ PESCA_SCHEMA = {
         {"name": "testedgeneexpression", "labels": ["103", "226", "672", "7157"]},
     ],
     "datatypes": [
-        {"name": "ZScore", "dimensions": ["timepoint", "testedperturbation", "testedgeneexpression"]},
-        {"name": "L2FC", "dimensions": ["timepoint", "testedperturbation", "testedgeneexpression"]},
+        {
+            "name": "ZScore",
+            "dimensions": ["timepoint", "testedperturbation", "testedgeneexpression"],
+        },
+        {
+            "name": "L2FC",
+            "dimensions": ["timepoint", "testedperturbation", "testedgeneexpression"],
+        },
     ],
     "chunk_shape": [
         {"name": "testedperturbation", "size": 1000},
@@ -138,8 +144,9 @@ def test_create_dataset_valid_names(client):
 
 def test_service_rejects_traversal_names(settings):
     """DatasetService rejects '..' and other unsafe names at the service layer."""
-    from cheesemonger.services.dataset import DatasetService, InvalidName
     import pytest
+
+    from cheesemonger.services.dataset import DatasetService, InvalidName
 
     ds = DatasetService(settings.data_dir)
     for bad_name in ["..", ".", "../etc", "foo/bar", "a b"]:

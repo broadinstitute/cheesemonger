@@ -25,7 +25,18 @@ dev = [
     "pytest",
     "httpx",
     "pyright",
+    "ruff",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: import sorting, B: bugbear (likely bugs),
+# UP: pyupgrade (modern syntax). Keeps the baseline clean and catches the
+# unused-import / bare-raise / ambiguous-name issues found in review.
+select = ["E", "F", "W", "I", "B", "UP"]
 
 [[tool.uv.index]]
 name = "public-python"

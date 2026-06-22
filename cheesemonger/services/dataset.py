@@ -10,7 +10,6 @@ from pathlib import Path
 from cheesemonger.schemas.common import (
     ChunkDim,
     DatatypeSpec,
-    Dimension,
     InvalidName,
     sanitize_name,
 )
@@ -80,7 +79,11 @@ class DatasetService:
                 continue
             schema = json.loads(schema_path.read_text())
             blocks_dir = child / "blocks"
-            block_count = sum(1 for b in blocks_dir.iterdir() if b.is_dir()) if blocks_dir.exists() else 0
+            block_count = (
+                sum(1 for b in blocks_dir.iterdir() if b.is_dir())
+                if blocks_dir.exists()
+                else 0
+            )
             summaries.append(
                 DatasetSummary(
                     name=schema["name"],

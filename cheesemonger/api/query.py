@@ -82,4 +82,4 @@ def query_data(
             get_block_path=lambda b: ds.get_block_zarr_path(dataset, b),
         )
     except QueryError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(status_code=422, detail=str(e)) from e

@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     thread_pool_size: int = 4
 
 
-@lru_cache()
+@lru_cache
 def _get_settings() -> Settings:
     return Settings()  # pyright: ignore [reportCallIssue]
 
