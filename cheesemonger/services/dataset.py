@@ -5,7 +5,15 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from cheesemonger.schemas.common import ChunkDim, DatatypeSpec, Dimension
+# InvalidName is re-exported so callers can import it alongside DatasetService;
+# sanitize_name is the shared validator (single source of truth in schemas).
+from cheesemonger.schemas.common import (
+    ChunkDim,
+    DatatypeSpec,
+    Dimension,
+    InvalidName,
+    sanitize_name,
+)
 from cheesemonger.schemas.dataset import (
     BlockInfo,
     DatasetCreated,
@@ -18,20 +26,27 @@ from cheesemonger.schemas.dataset import (
 
 _LABEL_TRUNCATION_THRESHOLD = 100
 
+__all__ = ["DatasetService", "InvalidName"]
+
 
 class DatasetService:
     def __init__(self, data_dir: str):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
+    # All path construction goes through sanitize_name, so no outside string
+    # can escape data_dir via "/" or "..".
     def _dataset_dir(self, name: str) -> Path:
-        return self.data_dir / name
+        return self.data_dir / sanitize_name(name)
 
     def _schema_path(self, name: str) -> Path:
         return self._dataset_dir(name) / "schema.json"
 
     def _blocks_dir(self, name: str) -> Path:
         return self._dataset_dir(name) / "blocks"
+
+    def _block_dir(self, dataset: str, block: str) -> Path:
+        return self._blocks_dir(dataset) / sanitize_name(block)
 
     def exists(self, name: str) -> bool:
         return self._schema_path(name).is_file()
@@ -129,29 +144,28 @@ class DatasetService:
 
     def delete_dataset(self, name: str) -> bool:
         ds_dir = self._dataset_dir(name)
+        # Never rmtree a path that escapes data_dir (e.g. via
+        # a symlink that slips past name validation).
+        if ds_dir.resolve().parent != self.data_dir.resolve():
+            raise InvalidName(f"Invalid dataset name: {name!r}")
         if not ds_dir.exists():
             return False
         shutil.rmtree(ds_dir)
         return True
 
     def block_exists(self, dataset: str, block: str) -> bool:
-        return (self._blocks_dir(dataset) / block).is_dir()
+        return self._block_dir(dataset, block).is_dir()
 
     def delete_block(self, dataset: str, block: str) -> bool:
-        block_dir = self._blocks_dir(dataset) / block
+        block_dir = self._block_dir(dataset, block)
+        # Refuse to rmtree anything that isn't a direct child
+        # of this dataset's blocks/ directory.
+        if block_dir.resolve().parent != self._blocks_dir(dataset).resolve():
+            raise InvalidName(f"Invalid block name: {block!r}")
         if not block_dir.exists():
             return False
         shutil.rmtree(block_dir)
         return True
 
     def get_block_zarr_path(self, dataset: str, block: str) -> Path:
-        return self._blocks_dir(dataset) / block
-
-    def get_dimension_labels(self, name: str, dim_name: str) -> list | None:
-        schema = self.get_schema(name)
-        if schema is None:
-            return None
-        for d in schema["dimensions"]:
-            if d["name"] == dim_name:
-                return d["labels"]
-        return None
+        return self._block_dir(dataset, block)

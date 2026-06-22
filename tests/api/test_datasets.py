@@ -79,3 +79,71 @@ def test_create_dataset_bad_dimension_ref(client):
     }
     response = client.post("/datasets", json=bad_schema)
     assert response.status_code == 400
+
+
+# --- Sanitization tests ---
+
+
+def test_create_dataset_path_traversal_name(client):
+    """Dataset name with path traversal must be rejected."""
+    bad = dict(PESCA_SCHEMA, name="../evil")
+    response = client.post("/datasets", json=bad)
+    assert response.status_code == 422
+
+    bad2 = dict(PESCA_SCHEMA, name="../../etc")
+    response = client.post("/datasets", json=bad2)
+    assert response.status_code == 422
+
+
+def test_create_dataset_dot_name(client):
+    """Names that are just '.' or '..' must be rejected."""
+    bad = dict(PESCA_SCHEMA, name="..")
+    response = client.post("/datasets", json=bad)
+    assert response.status_code == 422
+
+
+def test_create_dataset_slash_in_name(client):
+    """Slashes in names must be rejected."""
+    bad = dict(PESCA_SCHEMA, name="foo/bar")
+    response = client.post("/datasets", json=bad)
+    assert response.status_code == 422
+
+
+def test_create_dataset_space_in_name(client):
+    """Spaces in names must be rejected."""
+    bad = dict(PESCA_SCHEMA, name="foo bar")
+    response = client.post("/datasets", json=bad)
+    assert response.status_code == 422
+
+
+def test_create_dataset_dot_in_name(client):
+    """Dots are disallowed (no hidden files, no extension confusion)."""
+    bad = dict(PESCA_SCHEMA, name="foo.bar")
+    response = client.post("/datasets", json=bad)
+    assert response.status_code == 422
+
+
+def test_create_dataset_valid_names(client):
+    """Underscores, hyphens, mixed case, and digit-leading (cell-line) names.
+
+    Real DepMap cell-line block names start with digits (22Rv1, 786-O), so
+    leading digits must be allowed — the only constraint is no path separators
+    or dots.
+    """
+    for name in ["My-Dataset", "pesca_v2", "ABC", "22Rv1", "786-O"]:
+        schema = dict(PESCA_SCHEMA, name=name)
+        response = client.post("/datasets", json=schema)
+        assert response.status_code == 201, f"Name {name!r} should be valid"
+
+
+def test_service_rejects_traversal_names(settings):
+    """DatasetService rejects '..' and other unsafe names at the service layer."""
+    from cheesemonger.services.dataset import DatasetService, InvalidName
+    import pytest
+
+    ds = DatasetService(settings.data_dir)
+    for bad_name in ["..", ".", "../etc", "foo/bar", "a b"]:
+        with pytest.raises(InvalidName):
+            ds._dataset_dir(bad_name)
+        with pytest.raises(InvalidName):
+            ds._block_dir("pesca", bad_name)

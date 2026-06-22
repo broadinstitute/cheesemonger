@@ -24,6 +24,8 @@ def query_data(
     ds: Annotated[DatasetService, Depends(get_dataset_service)],
     qs: Annotated[QueryService, Depends(get_query_service)],
 ) -> QueryOut:
+    # An unsafe dataset name raises InvalidName from get_schema (path
+    # construction), which the app's global handler maps to 400.
     schema = ds.get_schema(dataset)
     if schema is None:
         raise HTTPException(status_code=404, detail="Dataset does not exist")
@@ -33,13 +35,11 @@ def query_data(
     dt_names = {d["name"] for d in schema["datatypes"]}
     valid_dims = dim_names | {last_dim}
 
-    # Validate datatypes
     datatypes = query.datatype if isinstance(query.datatype, list) else [query.datatype]
     for dt in datatypes:
         if dt not in dt_names:
             raise HTTPException(status_code=400, detail=f"Unknown datatype: {dt}")
 
-    # Validate dimension names in select
     for sel in query.select:
         if sel.dimension not in valid_dims:
             raise HTTPException(
@@ -47,7 +47,6 @@ def query_data(
                 detail=f"Unknown dimension in select: {sel.dimension}",
             )
 
-    # Validate aggregate spec
     if query.aggregate:
         if query.aggregate.over not in valid_dims:
             raise HTTPException(
@@ -65,7 +64,6 @@ def query_data(
                 detail=f"Cannot aggregate over '{query.aggregate.over}': it is fixed by select",
             )
 
-    # Validate that the selected block exists
     block_names = ds.list_block_names(dataset)
     block_sel = next((s for s in query.select if s.dimension == last_dim), None)
     if block_sel:

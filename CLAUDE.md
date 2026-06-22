@@ -43,6 +43,6 @@ uv run pytest tests/ -v                          # tests
 
 ## Design docs
 
-- `docs/api_design_draft.md` — Full API spec with 9 query cases
+- `docs/api_design.md` — Full API spec with 9 query cases
 - `docs/data_storage_design.md` — Storage model, chunking, benchmarks
 - `docs/architecture_diagram.md` — Mermaid diagrams

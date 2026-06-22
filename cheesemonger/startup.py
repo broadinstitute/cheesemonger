@@ -3,11 +3,13 @@
 Called once from main.py. Registers all routers and creates all
 singleton services (stored on app.state so they're shared across
 requests via FastAPI dependencies).
+
 """
 
 from importlib import metadata
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from .api.blocks import router as blocks_router
 from .api.datasets import router as datasets_router
@@ -15,6 +17,7 @@ from .api.gene_mappings import router as gene_mappings_router
 from .api.health import router as health_router
 from .api.query import router as query_router
 from .config import Settings
+from .schemas.common import InvalidName
 from .services.dataset import DatasetService
 from .services.gene_mappings import GeneMappingService
 from .services.query import QueryService
@@ -38,6 +41,13 @@ def create_app(settings: Settings) -> FastAPI:
         swagger_ui_oauth2_redirect_url=f"{api_prefix}/docs/oauth2-redirect",
         version=_VERSION,
     )
+
+    # Malformed dataset/block names (e.g. path-traversal attempts) surface as
+    # InvalidName from the service layer; map them to a clean 400.
+    def _invalid_name_handler(request: Request, exc: Exception) -> JSONResponse:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    app.add_exception_handler(InvalidName, _invalid_name_handler)
 
     # --- Singleton services (created once, shared across all requests) ---
 

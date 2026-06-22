@@ -1,16 +1,24 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from .common import ChunkDim, DatatypeSpec, Dimension
+from .common import (
+    MAX_DATATYPES,
+    MAX_DIMENSIONS,
+    ChunkDim,
+    DatatypeSpec,
+    Dimension,
+    SafeName,
+)
 
 
 class DatasetIn(BaseModel):
-    name: str
-    last_dimension: str
-    dimensions: list[Dimension]
-    datatypes: list[DatatypeSpec]
-    # TODO: Default should match docs: big chunks (1000, 5000). Currently empty. 
+    name: SafeName
+    last_dimension: SafeName
+    dimensions: list[Dimension] = Field(max_length=MAX_DIMENSIONS)
+    datatypes: list[DatatypeSpec] = Field(max_length=MAX_DATATYPES)
+    # Omitted dimensions use their full extent (a single chunk). An empty list
+    # means no dimension is explicitly chunked.
     chunk_shape: list[ChunkDim] = []
 
 

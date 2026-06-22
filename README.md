@@ -54,7 +54,7 @@ uv sync --group dev
 
 ```bash
 # Development (auto-reload)
-uv run uvicorn cheesemonger.main:uv run uvicorn cheesemonger.main:app --reloadapp --reload
+uv run uvicorn cheesemonger.main:app --reload
 
 # Production
 uv run gunicorn -k uvicorn.workers.UvicornWorker cheesemonger.main:app
@@ -118,7 +118,7 @@ Tests use temporary directories — no real data or Taiga access needed.
 | `POST`   | `/datasets/{dataset}/query`          | Query data                              |
 
 
-See `[docs/api_design_draft.md](docs/api_design_draft.md)` for full API documentation with examples.
+See `[docs/api_design.md](docs/api_design.md)` for full API documentation with examples.
 
 ## Data loading
 
@@ -157,7 +157,7 @@ cheesemonger/
 │       └── gene_mappings.py
 ├── tests/
 ├── docs/
-│   ├── api_design_draft.md
+│   ├── api_design.md
 │   ├── data_storage_design.md
 │   └── architecture_diagram.md
 └── pyproject.toml

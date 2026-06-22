@@ -19,6 +19,10 @@ from .deps import get_dataset_service
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
+# Note: unsafe names in URL path params raise InvalidName inside the service
+# layer (at path construction), which the app's global handler maps to 400.
+# Request-body names are validated by Pydantic (SafeName) and return 422.
+
 
 @router.post("", response_model=DatasetCreated, status_code=201)
 def create_dataset(
@@ -28,7 +32,6 @@ def create_dataset(
     if ds.exists(dataset_in.name):
         raise HTTPException(status_code=409, detail="A dataset with this name already exists")
 
-    # Validate that last_dimension is not also listed in dimensions
     dim_names = {d.name for d in dataset_in.dimensions}
     if dataset_in.last_dimension in dim_names:
         raise HTTPException(
@@ -36,7 +39,6 @@ def create_dataset(
             detail=f"last_dimension '{dataset_in.last_dimension}' must not appear in dimensions",
         )
 
-    # Validate that datatype dimension references are valid
     for dt in dataset_in.datatypes:
         for d in dt.dimensions:
             if d not in dim_names:
@@ -45,7 +47,6 @@ def create_dataset(
                     detail=f"Datatype '{dt.name}' references unknown dimension '{d}'",
                 )
 
-    # Validate no empty label lists
     for dim in dataset_in.dimensions:
         if not dim.labels:
             raise HTTPException(
