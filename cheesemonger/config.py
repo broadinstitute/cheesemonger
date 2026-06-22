@@ -7,10 +7,15 @@ can monkeypatch _get_settings without breaking the cache.
 
 from functools import lru_cache
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    # Settings come from environment variables, falling back to a local .env
+    # file if present (handy for development — e.g. DATA_DIR=./data). Explicit
+    # kwargs and real env vars take precedence over .env.
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
     api_prefix: str = ""
     data_dir: str = "/mnt/data"
     taiga_gene_mapping_id: str = "" # e.g. internal-26q1-82aa.94/Gene

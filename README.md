@@ -52,6 +52,14 @@ uv sync --group dev
 
 ### Run the server
 
+For local development, first create a `.env` so `DATA_DIR` points at a local
+path (the default `/mnt/data` is the production Hyperdisk mount and won't exist
+locally):
+
+```bash
+cp .env.example .env   # sets DATA_DIR=./data
+```
+
 ```bash
 # Development (auto-reload)
 uv run uvicorn cheesemonger.main:app --reload

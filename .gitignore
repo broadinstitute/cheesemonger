@@ -24,3 +24,6 @@ __pycache__/
 
 # Data directory (Zarr stores)
 /data/
+
+# Local environment overrides (.env.example is committed)
+.env
