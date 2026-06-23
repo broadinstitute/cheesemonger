@@ -40,6 +40,22 @@ def query_data(
         if dt not in dt_names:
             raise HTTPException(status_code=400, detail=f"Unknown datatype: {dt}")
 
+    # All datatypes in a batch must share the same dimensions. The response
+    # carries a single shared index/shape, so mixing differently-shaped
+    # datatypes (e.g. a 3-D ZScore with a 1-D nCtrlCells) would mislabel the
+    # result. The datatype's dimensions also define what may be aggregated.
+    dt_dims = {d["name"]: d["dimensions"] for d in schema["datatypes"]}
+    batch_dims = dt_dims[datatypes[0]]
+    for dt in datatypes[1:]:
+        if dt_dims[dt] != batch_dims:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Datatypes in a batch must share the same dimensions: "
+                    f"'{dt}' has {dt_dims[dt]}, '{datatypes[0]}' has {batch_dims}"
+                ),
+            )
+
     for sel in query.select:
         if sel.dimension not in valid_dims:
             raise HTTPException(
@@ -47,21 +63,52 @@ def query_data(
                 detail=f"Unknown dimension in select: {sel.dimension}",
             )
 
+    if query.diagonal:
+        # Diagonal extraction and aggregation are distinct operations; the
+        # engine applies diagonal and ignores aggregate, so reject the combo
+        # rather than silently dropping it.
+        if query.aggregate:
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot combine 'diagonal' with 'aggregate' in one query",
+            )
+        for d in query.diagonal:
+            if d not in batch_dims:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"diagonal dimension '{d}' is not a dimension of "
+                        f"datatype '{datatypes[0]}'"
+                    ),
+                )
+
     if query.aggregate:
-        if query.aggregate.over not in valid_dims:
+        over = query.aggregate.over
+        if over not in valid_dims:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unknown dimension in aggregate.over: {query.aggregate.over}",
+                detail=f"Unknown dimension in aggregate.over: {over}",
             )
         if query.aggregate.type == "count_lt" and query.aggregate.threshold is None:
             raise HTTPException(
                 status_code=422, detail="count_lt requires a threshold",
             )
         selected_dims = {s.dimension for s in query.select}
-        if query.aggregate.over in selected_dims:
+        if over in selected_dims:
             raise HTTPException(
                 status_code=422,
-                detail=f"Cannot aggregate over '{query.aggregate.over}': it is fixed by select",
+                detail=f"Cannot aggregate over '{over}': it is fixed by select",
+            )
+        # over == last_dim is cross-block aggregation (collapse the blocks).
+        # Otherwise it must be a real array dimension the datatype spans, or
+        # the engine would silently return un-aggregated data.
+        if over != last_dim and over not in batch_dims:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Cannot aggregate over '{over}': not a dimension of "
+                    f"datatype '{datatypes[0]}'"
+                ),
             )
 
     block_names = ds.list_block_names(dataset)

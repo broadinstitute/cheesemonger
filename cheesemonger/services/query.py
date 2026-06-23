@@ -246,6 +246,8 @@ class QueryService:
             if aggregate.type == "mean":
                 agg_result = np.nanmean(stacked, axis=0)
             elif aggregate.type == "count_lt":
+                if aggregate.threshold is None:
+                    raise QueryError("count_lt requires a threshold")
                 stacked_mask = np.stack([
                     all_results[b][dt] < aggregate.threshold
                     for b in target_blocks

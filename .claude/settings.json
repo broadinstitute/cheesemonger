@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv --version)",
+      "Bash(python3)",
+      "Bash(make lint *)",
+      "Bash(make typecheck *)",
+      "Bash(make test *)",
+      "Bash(make lint)",
+      "Bash(make typecheck)",
+      "Bash(make test)",
+      "Bash(make check)",
+    ]
+  }
+}
