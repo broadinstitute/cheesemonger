@@ -9,9 +9,9 @@ rather than doing manual label→integer index lookups on raw Zarr arrays.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import xarray as xr

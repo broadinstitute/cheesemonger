@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # InvalidName is re-exported so callers can import it alongside DatasetService;
@@ -119,7 +119,7 @@ class DatasetService:
             for b in sorted(blocks_dir.iterdir()):
                 if b.is_dir():
                     stat = b.stat()
-                    loaded_at = datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc).isoformat()
+                    loaded_at = datetime.fromtimestamp(stat.st_ctime, tz=UTC).isoformat()
                     blocks.append(BlockInfo(name=b.name, loaded_at=loaded_at))
 
         datatypes = [DatatypeSpec(**dt) for dt in schema["datatypes"]]

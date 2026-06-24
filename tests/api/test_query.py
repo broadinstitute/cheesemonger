@@ -198,7 +198,7 @@ def test_multi_block_no_aggregation(client, settings):
     assert body["shape"] == [2, 4]
     # Map rows back to blocks via the screen index (order is sorted).
     screens = body["index"][0]["labels"]
-    rows = dict(zip(screens, body["data"]["ZScore"]))
+    rows = dict(zip(screens, body["data"]["ZScore"], strict=True))
     assert rows["SW620"] == [0.0, 1.0, 2.0, 3.0]
     assert rows["HT29"] == [100.0, 101.0, 102.0, 103.0]
 

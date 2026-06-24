@@ -24,8 +24,8 @@ jobs:
         with:
           enable-cache: true
 
-      # Python 3.12 matches the committed uv.lock. (taigapy's pinned pandas
-      # needs >=3.11, so the lock cannot be installed on 3.9/3.10.)
+      # Python 3.12 satisfies requires-python >=3.11 and matches the lock.
+      # (zarr 3.1.1 and taigapy's pandas both require >=3.11.)
       - name: Set up Python
         run: uv python install 3.12
 

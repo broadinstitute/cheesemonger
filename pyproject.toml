@@ -2,18 +2,21 @@
 name = "cheesemonger"
 version = "0.1.0"
 description = "Low-latency REST API for multi-dimensional perturb-seq data"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "fastapi",
     "pydantic",
     "pydantic-settings",
     "uvicorn",
     "gunicorn",
-    "zarr",
+    # Pinned to match the zarr version used to write the delivered stores:
+    # xarray.Dataset.to_zarr() with zarr-python 3.1.1 produces the Zarr v3
+    # format, so the server needs a v3-capable reader. Keep this in sync with
+    # the data pipeline's zarr version.
+    "zarr==3.1.1",
     "numpy",
     "xarray",
     "taigapy==6.2.0",
-    "eval_type_backport; python_version < '3.10'",
 ]
 
 [build-system]
@@ -28,9 +31,24 @@ dev = [
     "ruff",
 ]
 
+[tool.pytest.ini_options]
+# Silence known third-party warnings so real ones stay visible. These are not
+# bugs in our code:
+#  - Starlette's TestClient deprecating httpx — upstream; revisit when a stable
+#    httpx2 / newer TestClient exists.
+#  - Zarr v3 has no finalized spec for fixed-length string dtypes or for
+#    consolidated metadata. The delivered stores are v3 (pinned zarr==3.1.1),
+#    so these are expected whenever tests write coord labels via to_zarr();
+#    not a pending decision.
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+    "ignore:The data type.*does not have a Zarr V3 specification",
+    "ignore:Consolidated metadata is currently not part",
+]
+
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py311"
 
 [tool.ruff.lint]
 # E/W: pycodestyle, F: pyflakes, I: import sorting, B: bugbear (likely bugs),

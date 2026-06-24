@@ -32,7 +32,7 @@ The key rule: **routers never touch disk directly**. They validate the HTTP requ
 
 ### Prerequisites
 
-- Python 3.9+
+- Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (for dependency management)
 
 ### Install
