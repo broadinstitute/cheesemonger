@@ -128,15 +128,108 @@ Tests use temporary directories — no real data or Taiga access needed.
 
 See `[docs/api_design.md](docs/api_design.md)` for full API documentation with examples.
 
-## Data loading
+## Loading & retrieving data
 
-Block loading is a CLI operation (not part of the REST API). Source data must be an xarray-exported Zarr store (written by `xarray.Dataset.to_zarr()`):
+Data flows in two steps: **deposit** a block with the CLI loader, then **retrieve**
+it over the HTTP API. A "block" is one value of the dataset's last dimension
+(e.g. one screen).
+
+- **Source** — where the data is delivered: a local path or a `gs://` URL of an
+  xarray-exported Zarr store (`xarray.Dataset.to_zarr()`). Read-only input.
+- **Store** (`DATA_DIR`) — the directory cheesemonger serves from. A local folder
+  in development; a mounted Persistent Disk on the VM in production. The loader
+  copies source → store; nothing is served from object storage.
+
+### Deposit (load a block)
+
+Loading is a CLI operation (not a REST endpoint), since loads are infrequent
+admin tasks that can be slow.
 
 ```bash
-python -m cheesemonger load \
-  --dataset pesca \
-  --block MCF7 \
-  --source gs://lab-results/experiment-42/pesca_output/
+# First block also creates the dataset — its schema (dimensions, labels,
+# datatypes) is inferred from the source store:
+uv run python -m cheesemonger load \
+  --source data/PS-SC-1_degs_broadcast.zarr \
+  --dataset perturb-scuba \
+  --block PS-SC-1 \
+  --create-dataset \
+  --data-dir ./local_store
+
+# Additional blocks into the same dataset (validated against the existing schema):
+uv run python -m cheesemonger load \
+  --source data/PS-SC-2_degs_broadcast.zarr \
+  --dataset perturb-scuba --block PS-SC-2 --data-dir ./local_store
+```
+
+| Flag | Purpose |
+| ---- | ------- |
+| `--source` | Local path or `gs://` URL of the source Zarr store |
+| `--dataset` / `--block` | Target dataset and block (e.g. screen ID) names |
+| `--create-dataset` | Infer + create the dataset schema if it doesn't exist |
+| `--last-dimension` | Block-key name when creating (default: `screen`) |
+| `--overwrite` | Replace the block if it already exists |
+| `--data-dir` | Store root (defaults to `DATA_DIR` from settings/`.env`) |
+
+A `gs://` source works the same way; it just needs credentials
+(`gcloud auth application-default login`, or a VM service account). The
+destination is still your local/PD `--data-dir`. On disk you get
+`./local_store/perturb-scuba/schema.json` and
+`./local_store/perturb-scuba/blocks/PS-SC-1/`.
+
+> **Note:** the loader currently expects the **broadcasted** store form (every
+> datatype spans all dimensions). An unbroadcasted store still loads, but queries
+> that fix a dimension a reduced-rank datatype lacks aren't supported yet
+> (tracked as `TODO(unbroadcast)`).
+
+### Retrieve (query)
+
+Point the server at the same store, then query over HTTP:
+
+```bash
+DATA_DIR=./local_store uv run uvicorn cheesemonger.main:app --reload
+```
+
+```bash
+# What's loaded?
+curl -s localhost:8000/datasets | python3 -m json.tool
+curl -s localhost:8000/datasets/perturb-scuba | python3 -m json.tool
+
+# Series: ZScore + L2FC + FDR for one perturbation at D4, across all Response genes
+curl -s localhost:8000/datasets/perturb-scuba/query \
+  -H 'content-type: application/json' \
+  -d '{
+    "datatype": ["ZScore", "L2FC", "FDR"],
+    "select": [
+      {"dimension": "screen", "value": "PS-SC-1"},
+      {"dimension": "Timepoint", "value": "D4"},
+      {"dimension": "Target", "value": "23293"}
+    ]
+  }'
+
+# Aggregation: mean ZScore across Targets at D4 (one value per Response gene)
+curl -s localhost:8000/datasets/perturb-scuba/query \
+  -H 'content-type: application/json' \
+  -d '{
+    "datatype": "ZScore",
+    "select": [
+      {"dimension": "screen", "value": "PS-SC-1"},
+      {"dimension": "Timepoint", "value": "D4"}
+    ],
+    "aggregate": {"type": "mean", "over": "Target"}
+  }'
+```
+
+In `select`, the block-key dimension (`screen`) routes to a block; the rest index
+within it. Omitting a dimension spans it. Responses can be large (one value per
+Response gene), so pipe through `python3 -m json.tool` or slice the arrays
+client-side. See [docs/api_design.md](docs/api_design.md) for all query patterns
+(multi-block, cross-screen aggregation, diagonal).
+
+### Manage
+
+```bash
+curl -s -X DELETE localhost:8000/datasets/perturb-scuba/blocks/PS-SC-1   # delete a block
+curl -s -X DELETE localhost:8000/datasets/perturb-scuba                  # delete dataset (must be empty)
 ```
 
 ## Project structure
@@ -145,6 +238,7 @@ python -m cheesemonger load \
 cheesemonger/
 ├── cheesemonger/           # Application package
 │   ├── main.py             # ASGI entrypoint
+│   ├── __main__.py         # CLI entrypoint (python -m cheesemonger load ...)
 │   ├── startup.py          # App factory (create_app)
 │   ├── config.py           # pydantic-settings
 │   ├── api/                # FastAPI routers (HTTP layer)
@@ -162,6 +256,7 @@ cheesemonger/
 │   └── services/           # Business logic (disk + Zarr operations)
 │       ├── dataset.py
 │       ├── query.py
+│       ├── loader.py        # Block loader (CLI ingest, local or gs://)
 │       └── gene_mappings.py
 ├── tests/
 ├── docs/
@@ -174,6 +269,7 @@ cheesemonger/
 ## Architecture
 
 - **Storage:** Each block (screen) is an xarray Dataset exported as Zarr on Hyperdisk. Data is written via `xarray.Dataset.to_zarr()`, which embeds coordinate labels alongside data variables.
+- **Loading:** A CLI loader (`python -m cheesemonger load`) ingests source Zarr stores (local or `gs://`) into the data directory, inferring or validating the dataset schema. See [Loading & retrieving data](#loading--retrieving-data).
 - **Query engine:** Reads blocks via `xarray.open_zarr()` with `.sel()` for label-based indexing. Uses ThreadPoolExecutor for parallel multi-block/multi-datatype reads.
 - **Gene mapping:** Loaded from Taiga at startup, served via `/gene_mappings` for client-side translation
 

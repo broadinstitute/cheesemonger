@@ -17,6 +17,9 @@ dependencies = [
     "numpy",
     "xarray",
     "taigapy==6.2.0",
+    # gcsfs lets xarray/zarr read gs:// URLs (the CLI data loader). Pulls in
+    # fsspec + google-auth; GCS access uses Application Default Credentials.
+    "gcsfs",
 ]
 
 [build-system]

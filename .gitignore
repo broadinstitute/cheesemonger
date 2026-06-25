@@ -25,5 +25,8 @@ __pycache__/
 # Data directory (Zarr stores)
 /data/
 
+# Local cheesemonger store (loader destination for local testing)
+/local_store/
+
 # Local environment overrides (.env.example is committed)
 .env

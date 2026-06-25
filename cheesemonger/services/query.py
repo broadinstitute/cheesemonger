@@ -70,6 +70,11 @@ def _read_datatype_from_ds(
     if diagonal:
         return _read_diagonal(da, array_selections, diagonal)
 
+    # TODO(unbroadcast): this applies every selection to the datatype, so it
+    # requires the "broadcasted" store form where each datatype spans all dims.
+    # To support the storage-efficient unbroadcasted delivery, skip selections
+    # for dims this datatype doesn't have (e.g. {k: v for k, v in
+    # array_selections.items() if k in da.dims}) rather than erroring.
     try:
         if array_selections:
             da = da.sel(array_selections)
