@@ -1,0 +1,25 @@
+# Keep the build context small and free of host-only / secret files.
+.git
+.github
+.venv
+**/.venv
+__pycache__
+**/__pycache__
+*.pyc
+
+# Not part of the server image
+clients/
+tests/
+docs/
+data/
+local_store/
+dist/
+*.egg-info/
+
+# Local config / editor / OS
+.env
+.cursor
+.claude
+.idea
+.DS_Store
+Makefile

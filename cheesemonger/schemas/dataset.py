@@ -76,3 +76,26 @@ class DatasetNotEmpty(BaseModel):
 class BlockDeleted(BaseModel):
     block: str
     deleted: bool = True
+
+
+class BlockLoadIn(BaseModel):
+    """Request to ingest a block from a server-readable Zarr source.
+
+    The source must be reachable by the *server* (a gs:// URL with the server's
+    credentials, or a path on the server's filesystem) — the data is not
+    uploaded through this request.
+    """
+
+    source: str
+    block: SafeName
+    create_dataset: bool = False
+    last_dimension: SafeName = "screen"
+    overwrite: bool = False
+
+
+class BlockLoaded(BaseModel):
+    dataset: str
+    block: str
+    path: str
+    dimensions: dict[str, int]
+    datatypes: list[str]

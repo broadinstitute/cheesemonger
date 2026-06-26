@@ -35,6 +35,9 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+# Only the server's own tests; clients/ (e.g. cheesypy) are separate packages
+# with their own environments and test suites.
+testpaths = ["tests"]
 # Silence known third-party warnings so real ones stay visible. These are not
 # bugs in our code:
 #  - Starlette's TestClient deprecating httpx — upstream; revisit when a stable

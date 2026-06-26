@@ -121,12 +121,29 @@ Tests use temporary directories — no real data or Taiga access needed.
 | `GET`    | `/datasets`                          | List all datasets                       |
 | `GET`    | `/datasets/{dataset}`                | Get dataset metadata                    |
 | `DELETE` | `/datasets/{dataset}`                | Delete an empty dataset                 |
+| `POST`   | `/datasets/{dataset}/blocks`         | Load a block from a server-readable Zarr source |
 | `DELETE` | `/datasets/{dataset}/blocks/{block}` | Delete a block                          |
 | `GET`    | `/gene_mappings`                     | Retrieve gene mapping (entrez ↔ symbol) |
 | `POST`   | `/datasets/{dataset}/query`          | Query data                              |
 
 
-See `[docs/api_design.md](docs/api_design.md)` for full API documentation with examples.
+See [docs/api_design.md](docs/api_design.md) for full API documentation with examples.
+There is no authentication yet (tracked in [docs/planning.md](docs/planning.md));
+on dev.cds.team the service sits behind oauth2_proxy.
+
+## Python client
+
+[`cheesypy`](clients/cheesypy/) is a standalone client (pandas-friendly) for
+querying and loading from Python:
+
+```python
+from cheesypy import Cheesemonger
+cm = Cheesemonger("https://dev.cds.team/cheesemonger")
+cm.series("perturb-scuba", ["ZScore", "L2FC", "FDR"],
+          screen="PS-SC-1", Timepoint="D4", Target="23293")   # -> DataFrame
+```
+
+See [clients/cheesypy/README.md](clients/cheesypy/README.md) for the full guide.
 
 ## Loading & retrieving data
 
@@ -259,10 +276,15 @@ cheesemonger/
 │       ├── loader.py        # Block loader (CLI ingest, local or gs://)
 │       └── gene_mappings.py
 ├── tests/
+├── clients/
+│   └── cheesypy/           # Standalone Python client (separate package)
 ├── docs/
 │   ├── api_design.md
 │   ├── data_storage_design.md
-│   └── architecture_diagram.md
+│   ├── architecture_diagram.md
+│   ├── deployment.md       # Deploying to dev.cds.team (Docker + Persistent Disk)
+│   └── planning.md         # Living TODO / decisions tracker
+├── Dockerfile
 └── pyproject.toml
 ```
 

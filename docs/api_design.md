@@ -8,7 +8,7 @@
 
 ## API Overview
 
-Eight endpoints. All request and response bodies are JSON. Data loading is done via CLI, perhaps could be a Jenkins job even.
+Nine endpoints. All request and response bodies are JSON.
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -17,9 +17,18 @@ Eight endpoints. All request and response bodies are JSON. Data loading is done 
 | `GET` | `/datasets` | List all datasets |
 | `GET` | `/datasets/{dataset}` | Get dataset metadata |
 | `DELETE` | `/datasets/{dataset}` | Delete an empty dataset (all blocks must be deleted first) |
+| `POST` | `/datasets/{dataset}/blocks` | Load a block from a server-readable Zarr source |
 | `DELETE` | `/datasets/{dataset}/blocks/{block}` | Delete a block |
 | `GET` | `/gene_mappings` | Get the gene mappings (entrez ↔ symbol) |
 | `POST` | `/datasets/{dataset}/query` | Query data |
+
+Block loading can be done two ways, both backed by the same loader: the CLI
+(`python -m cheesemonger load`, for admins on the server) or the
+`POST /datasets/{dataset}/blocks` endpoint (for remote clients, e.g. `cheesypy`).
+
+> **Note:** there is currently no authentication (see `docs/planning.md`). On
+> dev.cds.team the service sits behind oauth2_proxy (Broad OAuth), which gates
+> all of these — including the ingest endpoint — at the network edge.
 
 ---
 
@@ -260,6 +269,58 @@ Delete a dataset and its schema. All blocks must be deleted first, the dataset m
   "blocks": ["SW620", "HT29", "A549", "..."]
 }
 ```
+
+---
+
+### `POST /datasets/{dataset}/blocks`
+
+Load a block from a Zarr source the **server** can read. Data is not uploaded
+through the request — the body names a location (a `gs://` URL the server has
+credentials for, or a path on the server's filesystem). Runs the same loader as
+the CLI. Synchronous for v1 (the handler runs in a worker thread; very large
+sources should move to a background job — see `docs/planning.md`).
+
+**Request body**
+
+```json
+{
+  "source": "gs://cds_perturbseq_datasets/perturb-scuba/PS-SC-1_degs_broadcast.zarr",
+  "block": "PS-SC-1",
+  "create_dataset": true,
+  "last_dimension": "screen",
+  "overwrite": false
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `source` | string | yes | Server-readable Zarr store (`gs://…` or server path) |
+| `block` | string | yes | Block name (one value of the last dimension, e.g. a screen ID) |
+| `create_dataset` | bool | no | Infer + create the dataset schema if it doesn't exist (default `false`) |
+| `last_dimension` | string | no | Block-key name when creating (default `"screen"`) |
+| `overwrite` | bool | no | Replace the block if it already exists (default `false`) |
+
+**Response** `201 Created`
+
+```json
+{
+  "dataset": "perturb-scuba",
+  "block": "PS-SC-1",
+  "path": "/mnt/data/perturb-scuba/blocks/PS-SC-1",
+  "dimensions": {"Timepoint": 2, "Target": 2, "Response": 14588},
+  "datatypes": ["ZScore", "L2FC", "FDR", "..."]
+}
+```
+
+**Error cases**
+
+| Status | Condition |
+|--------|-----------|
+| `422 Unprocessable Entity` | Source unreadable, dataset missing without `create_dataset`, block exists without `overwrite`, or source not declared in the schema |
+
+> The current query engine expects the **broadcasted** store form (every
+> datatype spans all dimensions). Unbroadcasted stores load but aren't fully
+> queryable yet (see `docs/planning.md`).
 
 ---
 

@@ -1,0 +1,56 @@
+name: Publish cheesypy
+
+# Publishes the cheesypy client to the CDS Artifact Registry Python repo
+# (us-central1-python.pkg.dev/cds-artifacts/public-python).
+#
+# Triggers on a version tag like `cheesypy-v0.1.0`, or manually.
+# Bump the version in clients/cheesypy/pyproject.toml first, then tag:
+#   git tag cheesypy-v0.1.0 && git push origin cheesypy-v0.1.0
+#
+# Required repository configuration (Settings -> Secrets and variables -> Actions):
+#   vars.GCP_WORKLOAD_IDENTITY_PROVIDER  e.g. projects/123/locations/global/workloadIdentityPools/gh/providers/gh
+#   vars.GCP_SERVICE_ACCOUNT             a service account with Artifact Registry Writer on the repo
+# (Alternatively, swap the auth step for a service-account JSON key in secrets.)
+
+on:
+  push:
+    tags:
+      - "cheesypy-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # required for Workload Identity Federation
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/cheesypy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      # keyrings.google-artifactregistry-auth lets twine authenticate to AR
+      # using the Application Default Credentials from the auth step above.
+      - name: Publish to Artifact Registry
+        run: |
+          uv run --with twine --with keyrings.google-artifactregistry-auth \
+            twine upload \
+            --repository-url https://us-central1-python.pkg.dev/cds-artifacts/public-python/ \
+            dist/*
