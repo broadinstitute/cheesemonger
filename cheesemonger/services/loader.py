@@ -105,6 +105,37 @@ def _validate_against_schema(
             )
 
 
+def _write_dataset(ds: xr.Dataset, dest: str) -> None:
+    """Rechunk to sane chunk sizes and write to a Zarr store, with progress.
+
+    Delivered (especially broadcasted) stores can be pathologically
+    over-chunked — e.g. >100k tiny chunks for a few MB of data. Rechunking to
+    dask's "auto" target (~128 MB) collapses those into a handful of chunks, so
+    the stored block is small and fast to query, and the read parallelises
+    across threads instead of fetching every tiny chunk serially.
+
+    Requires dask (a dependency). If it's somehow missing, fall back to a plain
+    (serial, no-rechunk, no-progress) write so loading still works.
+
+    TODO(rechunk): honor the dataset's declared chunk_shape instead of "auto".
+    """
+    # Strip the source chunk encoding, or xarray reuses encoding["chunks"] on
+    # write and keeps the original (tiny) chunk layout regardless of rechunking.
+    for var in ds.variables.values():
+        for key in ("chunks", "preferred_chunks"):
+            var.encoding.pop(key, None)
+
+    try:
+        from dask.diagnostics import ProgressBar  # type: ignore[attr-defined]
+    except ImportError:
+        ds.to_zarr(dest, mode="w")
+        return
+
+    # dt: only refresh the bar every few seconds so it stays readable in logs.
+    with ProgressBar(dt=5.0):
+        ds.chunk("auto").to_zarr(dest, mode="w")
+
+
 def load_block(
     source: str,
     dataset: str,
@@ -168,10 +199,19 @@ def load_block(
             shutil.rmtree(dest)
 
         dest.parent.mkdir(parents=True, exist_ok=True)
-        logger.info("Writing block %r -> %s", block, dest)
-        # TODO(rechunk): honor the dataset's chunk_shape instead of copying the
-        # source chunking verbatim.
-        src.to_zarr(str(dest), mode="w")
+        try:
+            size_mb = src.nbytes / 1e6
+        except Exception:
+            size_mb = float("nan")
+        logger.info(
+            "Source: %d data variables, ~%.1f MB uncompressed, dims=%s",
+            len(src.data_vars), size_mb, dict(src.sizes),
+        )
+        logger.info(
+            "Writing block %r -> %s  (remote gs:// sources can take a while)",
+            block, dest,
+        )
+        _write_dataset(src, str(dest))
 
         summary = {
             "dataset": dataset,

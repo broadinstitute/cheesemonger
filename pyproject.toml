@@ -16,6 +16,9 @@ dependencies = [
     "zarr==3.1.1",
     "numpy",
     "xarray",
+    # dask gives xarray concurrent (not serial) Zarr reads and the load
+    # progress bar; without it, reading an over-chunked store is painfully slow.
+    "dask[array]",
     "taigapy==6.2.0",
     # gcsfs lets xarray/zarr read gs:// URLs (the CLI data loader). Pulls in
     # fsspec + google-auth; GCS access uses Application Default Credentials.
