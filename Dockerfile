@@ -1,7 +1,7 @@
 # Cheesemonger server image.
 #
 # Built and pushed by CI to:
-#   us-central1-docker.pkg.dev/cds-docker-containers/docker/cheesemonger
+#   us.gcr.io/cds-docker-containers/cheesemonger
 #
 # Runtime config is via env vars (see config.py); data lives on a mounted
 # volume (DATA_DIR, default /mnt/data) — nothing is baked into the image.
