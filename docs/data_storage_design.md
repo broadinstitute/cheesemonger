@@ -78,11 +78,12 @@ Each dimension has a 1-D coordinate array stored alongside the data. Because the
 
 ### On-disk layout (separate-block model)
 
-Each block is an xarray Dataset exported as Zarr. The coordinate arrays (`timepoint/`, `testedperturbation/`, etc.) are written by xarray alongside the data variables.
+Dataset metadata (schema, dimensions, datatypes, block registry) is stored in a **SQLite database** (`cheesemonger.db`), not on disk alongside the blocks. See the [API design doc](api_design.md#metadata-storage) for the ERD and details.
+
+Each block's **data** is an xarray Dataset exported as Zarr. The coordinate arrays (`timepoint/`, `testedperturbation/`, etc.) are written by xarray alongside the data variables.
 
 ```
 /mnt/data/pesca/
-  schema.json                    ← dataset schema (dimensions, datatypes, chunk shape)
   blocks/
     SW620/                       ← one block = one xarray Dataset as Zarr
       .zattrs                    ← xarray metadata (dimension names, conventions)

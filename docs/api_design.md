@@ -32,6 +32,76 @@ Block loading can be done two ways, both backed by the same loader: the CLI
 
 ---
 
+## Metadata Storage
+
+Dataset and block metadata is stored in a **SQLite database** (via SQLAlchemy), not
+in JSON files on disk. The database has two tables:
+
+### ERD
+
+```
+┌─────────────────────────────────────────────────┐
+│                   dataset                       │
+├─────────────────────────────────────────────────┤
+│ PK  id              STRING (UUID)               │
+│     name            STRING  [UNIQUE, INDEX]     │
+│     last_dimension  STRING                      │
+│     dimensions      JSON                        │
+│     datatypes       JSON                        │
+│     chunk_shape     JSON                        │
+│     created_at      DATETIME                    │
+└──────────────────────┬──────────────────────────┘
+                       │ 1 ─── * (one-to-many)
+                       │ ON DELETE RESTRICT
+┌──────────────────────┴──────────────────────────┐
+│                    block                        │
+├─────────────────────────────────────────────────┤
+│ PK  id              STRING (UUID)               │
+│ FK  dataset_id      STRING → dataset.id         │
+│     name            STRING  [INDEX]             │
+│     loaded_at       DATETIME                    │
+├─────────────────────────────────────────────────┤
+│ UNIQUE(dataset_id, name)                        │
+└─────────────────────────────────────────────────┘
+```
+
+**`dataset` table** — one row per dataset (e.g. `pesca`). Stores the schema:
+which dimensions exist, their coordinate labels, and which datatypes are
+available. `dimensions`, `datatypes`, and `chunk_shape` are JSON columns because
+they are complex nested structures (a dimension can have 50,000+ labels) that
+are always read and written as a unit.
+
+**`block` table** — one row per loaded block (e.g. `SW620`), foreign-keyed to
+its parent dataset. The actual multi-dimensional data lives on disk as Zarr
+stores; the database only records which blocks exist and when they were loaded.
+
+**Key constraints:**
+
+- `dataset.name` is `UNIQUE` — no two datasets can share a name.
+- `UNIQUE(dataset_id, name)` on `block` — no duplicate block names within a
+  dataset, but the same block name can exist in different datasets.
+- `FOREIGN KEY dataset_id ... ON DELETE RESTRICT` — the database refuses to
+  delete a dataset that still has blocks. This is the safety net behind the
+  app-layer 409 check (all blocks must be deleted before deleting a dataset).
+
+**Why SQLite?** Compared to the previous `schema.json` files:
+
+- Transactional writes — dataset creation and block registration are atomic.
+- Foreign key enforcement — the DB prevents orphaned blocks and enforces the
+  "delete blocks first" rule at the database level.
+- Single queryable source of truth — no scattered JSON files to scan.
+- Standard tooling — `sqlite3` CLI for debugging, backups are a file copy.
+
+**Scale:** The dataset table will have very few rows (1–10 datasets). The block
+table will have tens to low hundreds of rows (one per screen per dataset). This
+is a metadata registry, not a transactional database — the heavy data (43.2
+billion measurements) lives in Zarr stores on disk.
+
+**Default location:** `sqlite:///./cheesemonger.db` (configurable via
+`SQLALCHEMY_DATABASE_URL` environment variable).
+
+---
+
 ## Types
 
 Shared type definitions used across endpoints.
