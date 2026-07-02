@@ -18,8 +18,9 @@ class Settings(BaseSettings):
 
     api_prefix: str = ""
     data_dir: str = "/mnt/data"
-    taiga_gene_mapping_id: str = "" # e.g. internal-26q1-82aa.94/Gene
-    taiga_token_path: str = "" # /data2/taiga/token
+    sqlalchemy_database_url: str = "sqlite:///./cheesemonger.db"
+    taiga_gene_mapping_id: str = ""  # e.g. internal-26q1-82aa.94/Gene
+    taiga_token_path: str = ""  # /data2/taiga/token
     thread_pool_size: int = 4
 
 

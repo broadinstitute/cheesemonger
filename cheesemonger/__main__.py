@@ -22,7 +22,14 @@ from .services.loader import LoaderError, load_block
 
 
 def _cmd_load(args: argparse.Namespace) -> None:
-    data_dir = args.data_dir or get_settings().data_dir
+    settings = get_settings()
+    data_dir = args.data_dir or settings.data_dir
+
+    # Ensure DB tables exist before loading
+    from .db import get_engine
+    from .models.base import Base
+    Base.metadata.create_all(bind=get_engine(settings.sqlalchemy_database_url))
+
     try:
         summary = load_block(
             source=args.source,

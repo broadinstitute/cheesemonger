@@ -1,3 +1,7 @@
+import pytest
+
+from cheesemonger.schemas.common import InvalidName, sanitize_name
+
 PESCA_SCHEMA = {
     "name": "pesca",
     "last_dimension": "screen",
@@ -130,27 +134,21 @@ def test_create_dataset_dot_in_name(client):
 
 
 def test_create_dataset_valid_names(client):
-    """Underscores, hyphens, mixed case, and digit-leading (cell-line) names.
-
-    Real DepMap cell-line block names start with digits (22Rv1, 786-O), so
-    leading digits must be allowed — the only constraint is no path separators
-    or dots.
-    """
+    """Underscores, hyphens, mixed case, and digit-leading (cell-line) names."""
     for name in ["My-Dataset", "pesca_v2", "ABC", "22Rv1", "786-O"]:
         schema = dict(PESCA_SCHEMA, name=name)
         response = client.post("/datasets", json=schema)
         assert response.status_code == 201, f"Name {name!r} should be valid"
 
 
-def test_service_rejects_traversal_names(settings):
-    """DatasetService rejects '..' and other unsafe names at the service layer."""
-    import pytest
-
-    from cheesemonger.services.dataset import DatasetService, InvalidName
-
-    ds = DatasetService(settings.data_dir)
+def test_sanitize_name_rejects_traversal():
+    """sanitize_name rejects '..' and other unsafe names."""
     for bad_name in ["..", ".", "../etc", "foo/bar", "a b"]:
         with pytest.raises(InvalidName):
-            ds._dataset_dir(bad_name)
-        with pytest.raises(InvalidName):
-            ds._block_dir("pesca", bad_name)
+            sanitize_name(bad_name)
+
+
+def test_sanitize_name_allows_cell_line_names():
+    """Real cell-line names (digit-leading, hyphens) are valid."""
+    for name in ["22Rv1", "786-O", "769-P", "NCI-H460", "SW620"]:
+        assert sanitize_name(name) == name

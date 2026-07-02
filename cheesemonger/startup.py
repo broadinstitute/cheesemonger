@@ -1,9 +1,11 @@
 """App factory — creates and configures the FastAPI application.
 
-Called once from main.py. Registers all routers and creates all
-singleton services (stored on app.state so they're shared across
-requests via FastAPI dependencies).
+Called once from main.py. Registers all routers, creates DB tables,
+and creates singleton services (stored on app.state).
 
+TODO(security): Add authentication/authorization middleware.
+TODO(security): Add rate limiting for expensive query patterns.
+TODO(security): Add query resource limits (max blocks per query, memory cap).
 """
 
 from importlib import metadata
@@ -18,7 +20,6 @@ from .api.health import router as health_router
 from .api.query import router as query_router
 from .config import Settings
 from .schemas.common import InvalidName
-from .services.dataset import DatasetService
 from .services.gene_mappings import GeneMappingService
 from .services.query import QueryService
 
@@ -42,16 +43,17 @@ def create_app(settings: Settings) -> FastAPI:
         version=_VERSION,
     )
 
-    # Malformed dataset/block names (e.g. path-traversal attempts) surface as
-    # InvalidName from the service layer; map them to a clean 400.
     def _invalid_name_handler(request: Request, exc: Exception) -> JSONResponse:
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     app.add_exception_handler(InvalidName, _invalid_name_handler)
 
-    # --- Singleton services (created once, shared across all requests) ---
+    # Create all tables on startup (use Alembic migrations in production)
+    from .db import get_engine
+    from .models.base import Base
+    Base.metadata.create_all(bind=get_engine(settings.sqlalchemy_database_url))
 
-    app.state.dataset_service = DatasetService(settings.data_dir)
+    # --- Singleton services (stateful, shared across all requests) ---
 
     app.state.query_service = QueryService(
         thread_pool_size=settings.thread_pool_size,

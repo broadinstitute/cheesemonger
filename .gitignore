@@ -34,3 +34,8 @@ __pycache__/
 # Build artifacts
 dist/
 *.egg-info/
+
+# SQLite metadata DB (created at runtime; use a real path in prod)
+*.db
+*.db-wal
+*.db-shm

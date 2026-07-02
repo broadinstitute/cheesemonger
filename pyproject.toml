@@ -23,6 +23,7 @@ dependencies = [
     # gcsfs lets xarray/zarr read gs:// URLs (the CLI data loader). Pulls in
     # fsspec + google-auth; GCS access uses Application Default Credentials.
     "gcsfs",
+    "sqlalchemy>=2.0,<3.0",
 ]
 
 [build-system]

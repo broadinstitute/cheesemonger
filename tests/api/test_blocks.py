@@ -1,6 +1,6 @@
 import pytest
 
-from cheesemonger.services.dataset import DatasetService, InvalidName
+from cheesemonger.schemas.common import InvalidName, sanitize_name
 
 SCHEMA = {
     "name": "pesca",
@@ -25,9 +25,6 @@ def test_delete_block_traversal_preserves_dataset(client):
     """DELETE .../blocks/.. must not be able to rmtree the dataset itself.
 
     %2e%2e decodes to '..', a single path segment that routes to {block}.
-    Before the name-validation fix this resolved to the dataset directory and
-    shutil.rmtree wiped the whole dataset, bypassing the not-empty guard on
-    DELETE /datasets/{dataset}.
     """
     client.post("/datasets", json=SCHEMA)
 
@@ -38,30 +35,17 @@ def test_delete_block_traversal_preserves_dataset(client):
     assert client.get("/datasets/pesca").status_code == 200
 
 
-def test_service_rejects_traversal_names(settings):
-    """Definitive check at the service layer (independent of HTTP normalization)."""
-    ds = DatasetService(settings.data_dir)
-
-    with pytest.raises(InvalidName):
-        ds.delete_block("pesca", "..")
-    with pytest.raises(InvalidName):
-        ds.get_block_zarr_path("pesca", "../../etc")
-    with pytest.raises(InvalidName):
-        ds.delete_dataset("..")
-    with pytest.raises(InvalidName):
-        ds.block_exists("pesca", "..")
+def test_sanitize_name_rejects_traversal():
+    """sanitize_name rejects '..' and other unsafe names at the validation layer."""
+    for bad_name in ["..", "../etc", "../../etc", "foo/bar"]:
+        with pytest.raises(InvalidName):
+            sanitize_name(bad_name)
 
 
-def test_service_allows_cell_line_block_names(settings):
-    """Real cell-line names (digit-leading, hyphens) are valid block names.
-
-    These must be loadable and deletable through the same name rules, so the
-    sanitizer must not reject digit-leading or hyphenated identifiers.
-    """
-    ds = DatasetService(settings.data_dir)
+def test_sanitize_name_allows_cell_line_block_names():
+    """Real cell-line names (digit-leading, hyphens) are valid block names."""
     for name in ["22Rv1", "786-O", "769-P", "NCI-H460", "SW620"]:
-        # Should not raise — these resolve to a path inside the dataset.
-        assert ds.get_block_zarr_path("pesca", name).name == name
+        assert sanitize_name(name) == name
 
 
 # --- Ingest endpoint: POST /datasets/{dataset}/blocks ---

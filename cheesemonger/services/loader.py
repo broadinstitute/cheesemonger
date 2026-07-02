@@ -27,10 +27,12 @@ import logging
 import shutil
 
 import xarray as xr
+from sqlalchemy.orm import Session
 
+from cheesemonger.crud import dataset as ds_crud
 from cheesemonger.schemas.common import DatatypeSpec, Dimension
 from cheesemonger.schemas.dataset import DatasetIn
-from cheesemonger.services.dataset import DatasetService
+from cheesemonger.services import dataset as ds_paths
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,6 @@ def _coord_labels(src: xr.Dataset, dim: str) -> list:
         values = src.coords[dim].values.tolist()
     else:
         values = list(range(int(src.sizes[dim])))
-    # Dimension.labels must be a homogeneous list[int] | list[str].
     return [v if isinstance(v, int) and not isinstance(v, bool) else str(v) for v in values]
 
 
@@ -77,7 +78,7 @@ def _infer_schema(src: xr.Dataset, name: str, last_dimension: str) -> DatasetIn:
             datatypes=datatypes,
             chunk_shape=[],
         )
-    except Exception as e:  # pydantic ValidationError, InvalidName, etc.
+    except Exception as e:
         raise LoaderError(f"Inferred schema is invalid: {e}") from e
 
 
@@ -108,19 +109,8 @@ def _validate_against_schema(
 def _write_dataset(ds: xr.Dataset, dest: str) -> None:
     """Rechunk to sane chunk sizes and write to a Zarr store, with progress.
 
-    Delivered (especially broadcasted) stores can be pathologically
-    over-chunked — e.g. >100k tiny chunks for a few MB of data. Rechunking to
-    dask's "auto" target (~128 MB) collapses those into a handful of chunks, so
-    the stored block is small and fast to query, and the read parallelises
-    across threads instead of fetching every tiny chunk serially.
-
-    Requires dask (a dependency). If it's somehow missing, fall back to a plain
-    (serial, no-rechunk, no-progress) write so loading still works.
-
     TODO(rechunk): honor the dataset's declared chunk_shape instead of "auto".
     """
-    # Strip the source chunk encoding, or xarray reuses encoding["chunks"] on
-    # write and keeps the original (tiny) chunk layout regardless of rechunking.
     for var in ds.variables.values():
         for key in ("chunks", "preferred_chunks"):
             var.encoding.pop(key, None)
@@ -131,7 +121,6 @@ def _write_dataset(ds: xr.Dataset, dest: str) -> None:
         ds.to_zarr(dest, mode="w")
         return
 
-    # dt: only refresh the bar every few seconds so it stays readable in logs.
     with ProgressBar(dt=5.0):
         ds.chunk("auto").to_zarr(dest, mode="w")
 
@@ -142,6 +131,7 @@ def load_block(
     block: str,
     data_dir: str,
     *,
+    db: Session | None = None,
     last_dimension: str = "screen",
     create_dataset: bool = False,
     overwrite: bool = False,
@@ -153,17 +143,21 @@ def load_block(
         dataset: Target dataset name.
         block: Block name (one value of the last dimension, e.g. a screen ID).
         data_dir: Root data directory the API serves from.
-        last_dimension: Name of the block key (only used when creating the
-            dataset). Must not be one of the source store's dimensions.
-        create_dataset: If the dataset doesn't exist, infer its schema from the
-            source store and create it. Otherwise loading into a missing dataset
-            is an error.
+        db: SQLAlchemy session for metadata operations. If None (CLI usage),
+            a temporary session is created from the default settings.
+        last_dimension: Name of the block key (only used when creating).
+        create_dataset: If the dataset doesn't exist, infer and create it.
         overwrite: Replace the block if it already exists.
 
     Returns:
         A summary dict (dataset, block, path, dimensions, datatypes).
     """
-    svc = DatasetService(data_dir)
+    owns_session = False
+    if db is None:
+        from cheesemonger.config import get_settings
+        from cheesemonger.db import SessionLocal
+        db = SessionLocal(get_settings().sqlalchemy_database_url)
+        owns_session = True
 
     logger.info("Opening source store: %s", source)
     try:
@@ -172,23 +166,24 @@ def load_block(
         raise LoaderError(f"Could not open source Zarr store {source!r}: {e}") from e
 
     try:
-        existing_schema = svc.get_schema(dataset)
+        existing_schema = ds_crud.get_schema_dict(db, dataset)
         if existing_schema is not None:
             _validate_against_schema(src, existing_schema, dataset, last_dimension)
         elif create_dataset:
             dataset_in = _infer_schema(src, dataset, last_dimension)
-            svc.create(dataset_in)
+            ds_crud.create_dataset(db, dataset_in)
             logger.info(
                 "Created dataset %r (last_dimension=%r, %d dims, %d datatypes)",
                 dataset, last_dimension, len(dataset_in.dimensions), len(dataset_in.datatypes),
             )
+            ds_paths.blocks_dir(data_dir, dataset).mkdir(parents=True, exist_ok=True)
         else:
             raise LoaderError(
                 f"Dataset {dataset!r} does not exist. Pass create_dataset=True to "
                 f"infer its schema from the source store."
             )
 
-        dest = svc.get_block_zarr_path(dataset, block)
+        dest = ds_paths.block_dir(data_dir, dataset, block)
         if dest.exists():
             if not overwrite:
                 raise LoaderError(
@@ -213,6 +208,11 @@ def load_block(
         )
         _write_dataset(src, str(dest))
 
+        # Register the block in the DB
+        if not ds_crud.block_exists(db, dataset, block):
+            ds_crud.create_block(db, dataset, block)
+        db.commit()
+
         summary = {
             "dataset": dataset,
             "block": block,
@@ -222,6 +222,8 @@ def load_block(
         }
     finally:
         src.close()
+        if owns_session:
+            db.close()
 
     logger.info("Loaded block %r into dataset %r", block, dataset)
     return summary

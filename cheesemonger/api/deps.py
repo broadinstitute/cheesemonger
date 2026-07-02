@@ -1,20 +1,16 @@
 """Shared FastAPI dependencies for all routers.
 
-All services are singletons created once in create_app() and stored on
-app.state. Dependencies here simply retrieve them from the request.
+DB sessions are per-request (via get_db). Stateful services that hold
+thread pools or caches (QueryService, GeneMappingService) are singletons
+created once at startup and stored on app.state.
 """
 
 from __future__ import annotations
 
 from fastapi import Request
 
-from cheesemonger.services.dataset import DatasetService
 from cheesemonger.services.gene_mappings import GeneMappingService
 from cheesemonger.services.query import QueryService
-
-
-def get_dataset_service(request: Request) -> DatasetService:
-    return request.app.state.dataset_service
 
 
 def get_query_service(request: Request) -> QueryService:

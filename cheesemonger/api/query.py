@@ -7,12 +7,16 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 
+from cheesemonger.config import Settings, get_settings
+from cheesemonger.crud import dataset as ds_crud
+from cheesemonger.db import get_db
 from cheesemonger.schemas.query import QueryIn, QueryOut
-from cheesemonger.services.dataset import DatasetService
+from cheesemonger.services import dataset as ds_paths
 from cheesemonger.services.query import QueryError, QueryService
 
-from .deps import get_dataset_service, get_query_service
+from .deps import get_query_service
 
 router = APIRouter(prefix="/datasets/{dataset}", tags=["query"])
 
@@ -21,12 +25,11 @@ router = APIRouter(prefix="/datasets/{dataset}", tags=["query"])
 def query_data(
     dataset: str,
     query: QueryIn,
-    ds: Annotated[DatasetService, Depends(get_dataset_service)],
+    db: Annotated[Session, Depends(get_db)],
     qs: Annotated[QueryService, Depends(get_query_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> QueryOut:
-    # An unsafe dataset name raises InvalidName from get_schema (path
-    # construction), which the app's global handler maps to 400.
-    schema = ds.get_schema(dataset)
+    schema = ds_crud.get_schema_dict(db, dataset)
     if schema is None:
         raise HTTPException(status_code=404, detail="Dataset does not exist")
 
@@ -40,10 +43,6 @@ def query_data(
         if dt not in dt_names:
             raise HTTPException(status_code=400, detail=f"Unknown datatype: {dt}")
 
-    # All datatypes in a batch must share the same dimensions. The response
-    # carries a single shared index/shape, so mixing differently-shaped
-    # datatypes (e.g. a 3-D ZScore with a 1-D nCtrlCells) would mislabel the
-    # result. The datatype's dimensions also define what may be aggregated.
     dt_dims = {d["name"]: d["dimensions"] for d in schema["datatypes"]}
     batch_dims = dt_dims[datatypes[0]]
     for dt in datatypes[1:]:
@@ -64,9 +63,6 @@ def query_data(
             )
 
     if query.diagonal:
-        # Diagonal extraction and aggregation are distinct operations; the
-        # engine applies diagonal and ignores aggregate, so reject the combo
-        # rather than silently dropping it.
         if query.aggregate:
             raise HTTPException(
                 status_code=422,
@@ -77,8 +73,8 @@ def query_data(
                 raise HTTPException(
                     status_code=422,
                     detail=(
-                        f"diagonal dimension '{d}' is not a dimension of "
-                        f"datatype '{datatypes[0]}'"
+                        f"diagonal dimension '{d}' is not a dimension "
+                        f"of datatype '{datatypes[0]}'"
                     ),
                 )
 
@@ -90,28 +86,23 @@ def query_data(
                 detail=f"Unknown dimension in aggregate.over: {over}",
             )
         if query.aggregate.type == "count_lt" and query.aggregate.threshold is None:
-            raise HTTPException(
-                status_code=422, detail="count_lt requires a threshold",
-            )
+            raise HTTPException(status_code=422, detail="count_lt requires a threshold")
         selected_dims = {s.dimension for s in query.select}
         if over in selected_dims:
             raise HTTPException(
                 status_code=422,
                 detail=f"Cannot aggregate over '{over}': it is fixed by select",
             )
-        # over == last_dim is cross-block aggregation (collapse the blocks).
-        # Otherwise it must be a real array dimension the datatype spans, or
-        # the engine would silently return un-aggregated data.
         if over != last_dim and over not in batch_dims:
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"Cannot aggregate over '{over}': not a dimension of "
-                    f"datatype '{datatypes[0]}'"
+                    f"Cannot aggregate over '{over}': not a dimension "
+                    f"of datatype '{datatypes[0]}'"
                 ),
             )
 
-    block_names = ds.list_block_names(dataset)
+    block_names = ds_crud.list_block_names(db, dataset)
     block_sel = next((s for s in query.select if s.dimension == last_dim), None)
     if block_sel:
         block_name = str(block_sel.value)
@@ -126,7 +117,7 @@ def query_data(
             query=query,
             schema=schema,
             block_names=block_names,
-            get_block_path=lambda b: ds.get_block_zarr_path(dataset, b),
+            get_block_path=lambda b: ds_paths.block_dir(settings.data_dir, dataset, b),
         )
     except QueryError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e

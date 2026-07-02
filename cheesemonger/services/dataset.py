@@ -1,174 +1,27 @@
+"""Sanitized on-disk path helpers for dataset block directories.
+
+Metadata (dimensions, datatypes, blocks) now lives in SQLite via the crud
+layer. This module only builds the Zarr block directory paths — and it is the
+single place that does so, routing every dataset/block name through
+``sanitize_name`` so no request can escape ``data_dir`` via ``..`` or ``/``.
+The API layer stores metadata in SQLite (which is safe from path traversal),
+but the *filesystem* paths must still be sanitized here.
+"""
+
 from __future__ import annotations
 
-import json
-import shutil
-from datetime import UTC, datetime
 from pathlib import Path
 
-# InvalidName is re-exported so callers can import it alongside DatasetService;
-# sanitize_name is the shared validator (single source of truth in schemas).
-from cheesemonger.schemas.common import (
-    ChunkDim,
-    DatatypeSpec,
-    InvalidName,
-    sanitize_name,
-)
-from cheesemonger.schemas.dataset import (
-    BlockInfo,
-    DatasetCreated,
-    DatasetDetail,
-    DatasetIn,
-    DatasetListOut,
-    DatasetSummary,
-    DimensionInfo,
-)
-
-_LABEL_TRUNCATION_THRESHOLD = 100
-
-__all__ = ["DatasetService", "InvalidName"]
+from cheesemonger.schemas.common import sanitize_name
 
 
-class DatasetService:
-    def __init__(self, data_dir: str):
-        self.data_dir = Path(data_dir)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+def dataset_dir(data_dir: str, name: str) -> Path:
+    return Path(data_dir) / sanitize_name(name)
 
-    # All path construction goes through sanitize_name, so no outside string
-    # can escape data_dir via "/" or "..".
-    def _dataset_dir(self, name: str) -> Path:
-        return self.data_dir / sanitize_name(name)
 
-    def _schema_path(self, name: str) -> Path:
-        return self._dataset_dir(name) / "schema.json"
+def blocks_dir(data_dir: str, name: str) -> Path:
+    return dataset_dir(data_dir, name) / "blocks"
 
-    def _blocks_dir(self, name: str) -> Path:
-        return self._dataset_dir(name) / "blocks"
 
-    def _block_dir(self, dataset: str, block: str) -> Path:
-        return self._blocks_dir(dataset) / sanitize_name(block)
-
-    def exists(self, name: str) -> bool:
-        return self._schema_path(name).is_file()
-
-    def create(self, dataset_in: DatasetIn) -> DatasetCreated:
-        ds_dir = self._dataset_dir(dataset_in.name)
-        ds_dir.mkdir(parents=True, exist_ok=True)
-        self._blocks_dir(dataset_in.name).mkdir(exist_ok=True)
-
-        schema = dataset_in.model_dump()
-        self._schema_path(dataset_in.name).write_text(
-            json.dumps(schema, indent=2, default=str)
-        )
-
-        return DatasetCreated(
-            name=dataset_in.name,
-            last_dimension=dataset_in.last_dimension,
-            dimensions=len(dataset_in.dimensions),
-            datatypes=len(dataset_in.datatypes),
-            chunk_shape=dataset_in.chunk_shape,
-        )
-
-    def list_datasets(self) -> DatasetListOut:
-        summaries: list[DatasetSummary] = []
-        if not self.data_dir.exists():
-            return DatasetListOut(datasets=[])
-
-        for child in sorted(self.data_dir.iterdir()):
-            schema_path = child / "schema.json"
-            if not schema_path.is_file():
-                continue
-            schema = json.loads(schema_path.read_text())
-            blocks_dir = child / "blocks"
-            block_count = (
-                sum(1 for b in blocks_dir.iterdir() if b.is_dir())
-                if blocks_dir.exists()
-                else 0
-            )
-            summaries.append(
-                DatasetSummary(
-                    name=schema["name"],
-                    blocks=block_count,
-                    datatypes=len(schema["datatypes"]),
-                )
-            )
-        return DatasetListOut(datasets=summaries)
-
-    def get_detail(self, name: str) -> DatasetDetail | None:
-        if not self.exists(name):
-            return None
-
-        schema = json.loads(self._schema_path(name).read_text())
-
-        dims: list[DimensionInfo] = []
-        for d in schema["dimensions"]:
-            labels = d["labels"]
-            size = len(labels)
-            if size > _LABEL_TRUNCATION_THRESHOLD:
-                dims.append(DimensionInfo(
-                    name=d["name"],
-                    size=size,
-                    labels_truncated=True,
-                    labels_sample=labels[:5],
-                ))
-            else:
-                dims.append(DimensionInfo(name=d["name"], size=size, labels=labels))
-
-        blocks: list[BlockInfo] = []
-        blocks_dir = self._blocks_dir(name)
-        if blocks_dir.exists():
-            for b in sorted(blocks_dir.iterdir()):
-                if b.is_dir():
-                    stat = b.stat()
-                    loaded_at = datetime.fromtimestamp(stat.st_ctime, tz=UTC).isoformat()
-                    blocks.append(BlockInfo(name=b.name, loaded_at=loaded_at))
-
-        datatypes = [DatatypeSpec(**dt) for dt in schema["datatypes"]]
-        chunk_shape = [ChunkDim(**c) for c in schema.get("chunk_shape", [])]
-
-        return DatasetDetail(
-            name=name,
-            last_dimension=schema["last_dimension"],
-            dimensions=dims,
-            blocks=blocks,
-            datatypes=datatypes,
-            chunk_shape=chunk_shape,
-        )
-
-    def get_schema(self, name: str) -> dict | None:
-        if not self.exists(name):
-            return None
-        return json.loads(self._schema_path(name).read_text())
-
-    def list_block_names(self, name: str) -> list[str]:
-        blocks_dir = self._blocks_dir(name)
-        if not blocks_dir.exists():
-            return []
-        return sorted(b.name for b in blocks_dir.iterdir() if b.is_dir())
-
-    def delete_dataset(self, name: str) -> bool:
-        ds_dir = self._dataset_dir(name)
-        # Never rmtree a path that escapes data_dir (e.g. via
-        # a symlink that slips past name validation).
-        if ds_dir.resolve().parent != self.data_dir.resolve():
-            raise InvalidName(f"Invalid dataset name: {name!r}")
-        if not ds_dir.exists():
-            return False
-        shutil.rmtree(ds_dir)
-        return True
-
-    def block_exists(self, dataset: str, block: str) -> bool:
-        return self._block_dir(dataset, block).is_dir()
-
-    def delete_block(self, dataset: str, block: str) -> bool:
-        block_dir = self._block_dir(dataset, block)
-        # Refuse to rmtree anything that isn't a direct child
-        # of this dataset's blocks/ directory.
-        if block_dir.resolve().parent != self._blocks_dir(dataset).resolve():
-            raise InvalidName(f"Invalid block name: {block!r}")
-        if not block_dir.exists():
-            return False
-        shutil.rmtree(block_dir)
-        return True
-
-    def get_block_zarr_path(self, dataset: str, block: str) -> Path:
-        return self._block_dir(dataset, block)
+def block_dir(data_dir: str, dataset: str, block: str) -> Path:
+    return blocks_dir(data_dir, dataset) / sanitize_name(block)
