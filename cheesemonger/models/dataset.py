@@ -25,9 +25,7 @@ class Dataset(Base, UUIDMixin):
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
 
-    blocks: Mapped[list["Block"]] = relationship(
-        back_populates="dataset_rel", cascade="all, delete-orphan"
-    )
+    blocks: Mapped[list["Block"]] = relationship(back_populates="dataset_rel")
 
 
 class Block(Base, UUIDMixin):
@@ -37,7 +35,7 @@ class Block(Base, UUIDMixin):
     )
 
     dataset_id: Mapped[str] = mapped_column(
-        String, ForeignKey("dataset.id", ondelete="CASCADE"), nullable=False
+        String, ForeignKey("dataset.id", ondelete="RESTRICT"), nullable=False
     )
     name: Mapped[str] = mapped_column(String, nullable=False, index=True)
     loaded_at: Mapped[datetime] = mapped_column(

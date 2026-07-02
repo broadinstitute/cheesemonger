@@ -280,6 +280,7 @@ cheesemonger/
 │   └── cheesypy/           # Standalone Python client (separate package)
 ├── docs/
 │   ├── api_design.md
+│   ├── data_model.md       # Data model: SQLite metadata + Zarr layout
 │   ├── data_storage_design.md
 │   ├── architecture_diagram.md
 │   ├── deployment.md       # Deploying to dev.cds.team (Docker + Persistent Disk)

@@ -2,10 +2,6 @@
 
 Called once from main.py. Registers all routers, creates DB tables,
 and creates singleton services (stored on app.state).
-
-TODO(security): Add authentication/authorization middleware.
-TODO(security): Add rate limiting for expensive query patterns.
-TODO(security): Add query resource limits (max blocks per query, memory cap).
 """
 
 from importlib import metadata
