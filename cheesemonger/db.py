@@ -1,4 +1,6 @@
 import sqlite3
+from collections.abc import Iterator
+from functools import cache
 from typing import Annotated
 
 from fastapi import Depends
@@ -6,7 +8,6 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings, get_settings
-
 
 @event.listens_for(Engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
@@ -21,7 +22,9 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor.close()
 
 
-def get_engine(sqlalchemy_database_url: str):
+@cache
+def get_engine(sqlalchemy_database_url: str) -> Engine:
+    # Cached: one Engine (and connection pool) per URL, reused across requests.
     return create_engine(
         sqlalchemy_database_url,
         connect_args={"check_same_thread": False},
@@ -39,5 +42,10 @@ def SessionLocal(sqlalchemy_database_url: str) -> Session:
     return session
 
 
-def get_db(settings: Annotated[Settings, Depends(get_settings)]) -> Session:
-    return SessionLocal(settings.sqlalchemy_database_url)
+def get_db(settings: Annotated[Settings, Depends(get_settings)]) -> Iterator[Session]:
+    # Generator dependency so FastAPI closes the session after the request.
+    db = SessionLocal(settings.sqlalchemy_database_url)
+    try:
+        yield db
+    finally:
+        db.close()
