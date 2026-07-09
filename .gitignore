@@ -24,6 +24,7 @@ __pycache__/
 
 # Data directory (Zarr stores)
 /data/
+/clients/data/
 
 # Local cheesemonger store (loader destination for local testing)
 /local_store/
