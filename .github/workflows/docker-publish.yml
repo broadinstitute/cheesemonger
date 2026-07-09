@@ -1,4 +1,4 @@
-name: Build & push image
+name: Build & push Cheesemonger image
 
 # Builds the server image and pushes it to the CDS Artifact Registry Docker repo.
 # Runs only when server code or build inputs change (path filter below), on the

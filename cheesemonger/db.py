@@ -14,6 +14,11 @@ from .config import Settings, get_settings
 def set_sqlite_pragma(dbapi_connection, connection_record):
     if type(dbapi_connection) is sqlite3.Connection:
         cursor = dbapi_connection.cursor()
+        # Wait up to 30s for a lock instead of failing immediately. Without
+        # this, gunicorn workers booting concurrently race on the WAL switch
+        # below (which needs a brief exclusive lock) and the losers crash with
+        # "database is locked". Must be set before any locking operation.
+        cursor.execute("PRAGMA busy_timeout=30000")
         cursor.execute("PRAGMA foreign_keys=ON")
         # Turn on Write-Ahead Logging to allow reads while writes are in progress
         cursor.execute("PRAGMA journal_mode=WAL;")
