@@ -4,6 +4,8 @@ Called once from main.py. Registers all routers, creates DB tables,
 and creates singleton services (stored on app.state).
 """
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from importlib import metadata
 
 from fastapi import APIRouter, FastAPI, Request
@@ -27,6 +29,15 @@ except metadata.PackageNotFoundError:
     _VERSION = "0.0.0"
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Startup logic runs before `yield`; shutdown logic runs after.
+    # Services are created in create_app() and stored on app.state, so
+    # they're available here by the time the app starts serving.
+    yield
+    app.state.query_service.shutdown()
+
+
 def create_app(settings: Settings) -> FastAPI:
     api_prefix = settings.api_prefix
 
@@ -37,6 +48,7 @@ def create_app(settings: Settings) -> FastAPI:
         redoc_url=f"{api_prefix}/redoc",
         swagger_ui_oauth2_redirect_url=f"{api_prefix}/docs/oauth2-redirect",
         version=_VERSION,
+        lifespan=_lifespan,
     )
 
     def _invalid_name_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -44,7 +56,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     app.add_exception_handler(InvalidName, _invalid_name_handler)
 
-    # Create all tables on startup (use Alembic migrations in production)
+    # Create all tables on startup
     from .db import get_engine
     from .models.base import Base
     Base.metadata.create_all(bind=get_engine(settings.sqlalchemy_database_url))

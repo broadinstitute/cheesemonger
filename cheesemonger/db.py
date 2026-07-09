@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings, get_settings
 
+
 @event.listens_for(Engine, "connect")
 def set_sqlite_pragma(dbapi_connection, connection_record):
     if type(dbapi_connection) is sqlite3.Connection:

@@ -137,6 +137,14 @@ class QueryService:
     def __init__(self, thread_pool_size: int = 4):
         self.executor = ThreadPoolExecutor(max_workers=thread_pool_size)
 
+    def shutdown(self) -> None:
+        """Shut down the thread pool, waiting for in-flight reads to finish.
+
+        Called from the app's lifespan handler so the executor's worker
+        threads are joined cleanly on shutdown rather than being abandoned.
+        """
+        self.executor.shutdown(wait=True)
+
     def execute(
         self,
         query: QueryIn,
