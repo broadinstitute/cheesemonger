@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from sqlalchemy import JSON, DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from ..schemas.common import ChunkDimDict, DatatypeDict, DimensionDict
 from .base import Base, UUIDMixin
 
 
@@ -18,9 +19,9 @@ class Dataset(Base, UUIDMixin):
 
     name: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
     last_dimension: Mapped[str] = mapped_column(String, nullable=False)
-    dimensions: Mapped[list] = mapped_column(JSON, nullable=False)
-    datatypes: Mapped[list] = mapped_column(JSON, nullable=False)
-    chunk_shape: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    dimensions: Mapped[list[DimensionDict]] = mapped_column(JSON, nullable=False)
+    datatypes: Mapped[list[DatatypeDict]] = mapped_column(JSON, nullable=False)
+    chunk_shape: Mapped[list[ChunkDimDict]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )

@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from cheesemonger.schemas.common import DatatypeDict, SchemaDict
 from cheesemonger.schemas.query import (
     AggregateSpec,
     IndexLevel,
@@ -192,7 +193,7 @@ class QueryService:
     def execute(
         self,
         query: QueryIn,
-        schema: dict,
+        schema: SchemaDict,
         block_names: list[str],
         get_block_path: Callable[[str], Path],
     ) -> QueryOut:
@@ -284,11 +285,11 @@ class QueryService:
         all_results: dict[str, dict[str, np.ndarray]],
         target_blocks: list[str],
         datatypes: list[str],
-        schema: dict,
+        schema: SchemaDict,
         aggregate: AggregateSpec,
         array_selections: dict[str, int | str],
         diagonal: tuple[str, str] | None,
-        dt_spec: dict | None,
+        dt_spec: DatatypeDict | None,
     ) -> QueryOut:
         """Aggregate raw values across blocks.
 
@@ -321,11 +322,11 @@ class QueryService:
         all_results: dict[str, dict[str, np.ndarray]],
         target_blocks: list[str],
         datatypes: list[str],
-        schema: dict,
+        schema: SchemaDict,
         array_selections: dict[str, int | str],
         within_block_agg: bool,
         query: QueryIn,
-        dt_spec: dict | None,
+        dt_spec: DatatypeDict | None,
     ) -> QueryOut:
         block = target_blocks[0]
         data: dict[str, list | float | int | None] = {}
@@ -356,12 +357,12 @@ class QueryService:
         all_results: dict[str, dict[str, np.ndarray]],
         target_blocks: list[str],
         datatypes: list[str],
-        schema: dict,
+        schema: SchemaDict,
         array_selections: dict[str, int | str],
         within_block_agg: bool,
         query: QueryIn,
         last_dim: str,
-        dt_spec: dict | None,
+        dt_spec: DatatypeDict | None,
     ) -> QueryOut:
         """Build response for multi-block queries without cross-block aggregation.
 
@@ -397,8 +398,8 @@ class QueryService:
 
     def _build_index(
         self,
-        dt_spec: dict | None,
-        schema: dict,
+        dt_spec: DatatypeDict | None,
+        schema: SchemaDict,
         array_selections: dict[str, int | str],
         aggregate: AggregateSpec | None,
         diagonal: tuple[str, str] | None,
@@ -430,7 +431,7 @@ class QueryService:
         return index
 
     @staticmethod
-    def _get_dim_labels(schema: dict, dim_name: str) -> list:
+    def _get_dim_labels(schema: SchemaDict, dim_name: str) -> list:
         for d in schema["dimensions"]:
             if d["name"] == dim_name:
                 return d["labels"]

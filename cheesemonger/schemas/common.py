@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Annotated
+from typing import Annotated, TypedDict
 
 from pydantic import AfterValidator, BaseModel, Field
 
@@ -63,3 +63,38 @@ class DatatypeSpec(BaseModel):
 class ChunkDim(BaseModel):
     name: SafeName
     size: int = Field(gt=0)
+
+
+# --- Persisted "JSON" shapes -------------------------------------------------
+# The Pydantic models above validate request bodies. Once dumped and stored in
+# SQLite's JSON columns (and read back by the query engine), they're plain dicts.
+# These TypedDicts describe that deserialized dict form so the ORM columns and
+# the query path are typed instead of bare `list`/`dict`. Annotation-only — no
+# runtime cost; the Pydantic models remain the single validation gate on input.
+
+
+class DimensionDict(TypedDict):
+    name: str
+    labels: list[int] | list[str]
+
+
+class DatatypeDict(TypedDict):
+    name: str
+    dimensions: list[str]
+    dtype: str
+
+
+class ChunkDimDict(TypedDict):
+    name: str
+    size: int
+
+
+class SchemaDict(TypedDict):
+    """A dataset's schema as a plain dict — the form crud.get_schema_dict returns
+    and the query engine reads."""
+
+    name: str
+    last_dimension: str
+    dimensions: list[DimensionDict]
+    datatypes: list[DatatypeDict]
+    chunk_shape: list[ChunkDimDict]
