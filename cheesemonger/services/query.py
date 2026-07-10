@@ -79,6 +79,17 @@ def _read_datatype_from_ds(
         if applicable:
             da = da.sel(applicable)
     except KeyError as e:
+        # Pinpoint which value(s) aren't valid labels so the error is
+        # actionable — xarray's default only says "not all values found".
+        missing = [
+            f"{dim}={val!r}"
+            for dim, val in applicable.items()
+            if str(val) not in {str(x) for x in da.coords[dim].values.tolist()}
+        ]
+        if missing:
+            raise QueryError(
+                f"Selection value(s) not found in dataset: {', '.join(missing)}"
+            ) from e
         raise QueryError(f"Selection error: {e}") from e
 
     arr = da.values

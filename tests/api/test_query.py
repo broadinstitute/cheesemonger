@@ -305,6 +305,21 @@ def test_diagonal_with_aggregate_rejected(client, settings, db):
     assert r.status_code == 422, r.text
 
 
+def test_unknown_selection_value_names_the_value(client, settings, db):
+    """A bad label produces a clear error naming the offending dim=value."""
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
+    r = _query(client, {
+        "datatype": "ZScore",
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "testedperturbation", "value": "NOSUCHGENE"},
+        ],
+    })
+    assert r.status_code == 422, r.text
+    detail = r.json()["detail"]
+    assert "testedperturbation" in detail and "NOSUCHGENE" in detail
+
+
 def test_unknown_block_is_404(client, settings, db):
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
     r = _query(client, {
