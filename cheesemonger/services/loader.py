@@ -118,10 +118,14 @@ def _write_dataset(ds: xr.Dataset, dest: str) -> None:
     try:
         from dask.diagnostics import ProgressBar  # type: ignore[attr-defined]
     except ImportError:
+        logger.info("Writing (no dask; progress bar unavailable)...")
         ds.to_zarr(dest, mode="w")
         return
 
-    with ProgressBar(dt=5.0):
+    # dt=1.0 so the bar updates every second — enough to see it's alive on a
+    # slow remote read without spamming the terminal. The bar covers the whole
+    # read+write compute (reading source chunks, writing them to dest).
+    with ProgressBar(dt=1.0):
         ds.chunk("auto").to_zarr(dest, mode="w")
 
 

@@ -149,11 +149,24 @@ class IndexLevel(BaseModel):
 
 ### `GET /health`
 
+Liveness plus a readiness signal for the gene mapping. `status` is `"ok"` as long
+as the process can answer. The `gene_mapping` block reports whether the Taiga
+mapping loaded at startup (it loads lazily and degrades silently if Taiga fails):
+
+- `loaded: false, taiga_id: ""` — no mapping configured.
+- `loaded: false, taiga_id: "…"` — configured but **failed to load** (check logs / token).
+- `loaded: true` — mapping is serving `entries` genes.
+
 **Response** `200 OK`
 
 ```json
 {
-  "status": "ok"
+  "status": "ok",
+  "gene_mapping": {
+    "loaded": true,
+    "entries": 43849,
+    "taiga_id": "hgnc-gene-table-e250.4/hgnc_complete_set"
+  }
 }
 ```
 

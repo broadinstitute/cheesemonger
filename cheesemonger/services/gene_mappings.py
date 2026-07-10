@@ -96,7 +96,9 @@ class GeneMappingService:
             df = tc.get(taiga_id)
         except Exception:
             logger.exception("Failed to load gene mapping from Taiga: %s", taiga_id)
-            return cls.empty()
+            # Keep the configured id so /health can distinguish "configured but
+            # failed to load" (taiga_id set, no entries) from "never configured".
+            return cls(taiga_id=taiga_id, entries={})
 
         entries = _entries_from_dataframe(df) if df is not None and not df.empty else {}
 
