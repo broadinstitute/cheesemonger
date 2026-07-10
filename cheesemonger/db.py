@@ -1,5 +1,6 @@
 import sqlite3
 from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import cache
 from typing import Annotated
 
@@ -53,5 +54,24 @@ def get_db(settings: Annotated[Settings, Depends(get_settings)]) -> Iterator[Ses
     db = SessionLocal(settings.sqlalchemy_database_url)
     try:
         yield db
+    finally:
+        db.close()
+
+
+@contextmanager
+def session_scope(sqlalchemy_database_url: str) -> Iterator[Session]:
+    """A transactional session scope for callers that own the session.
+
+    Commits on clean exit, rolls back on error, always closes. CLI commands wrap
+    their work in this so the loader/services stay pure — they receive a Session
+    and never create, commit, or close one.
+    """
+    db = SessionLocal(sqlalchemy_database_url)
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()

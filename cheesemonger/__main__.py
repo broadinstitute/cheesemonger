@@ -19,6 +19,7 @@ import logging
 import sys
 
 from .config import get_settings
+from .db import session_scope
 from .services.loader import LoaderError, delete_block, delete_dataset, load_block
 
 
@@ -35,15 +36,17 @@ def _cmd_load(args: argparse.Namespace) -> None:
     _ensure_tables(settings)
 
     try:
-        summary = load_block(
-            source=args.source,
-            dataset=args.dataset,
-            block=args.block,
-            data_dir=data_dir,
-            last_dimension=args.last_dimension,
-            create_dataset=args.create_dataset,
-            overwrite=args.overwrite,
-        )
+        with session_scope(settings.sqlalchemy_database_url) as db:
+            summary = load_block(
+                source=args.source,
+                dataset=args.dataset,
+                block=args.block,
+                data_dir=data_dir,
+                db=db,
+                last_dimension=args.last_dimension,
+                create_dataset=args.create_dataset,
+                overwrite=args.overwrite,
+            )
     except LoaderError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
@@ -62,7 +65,8 @@ def _cmd_delete_block(args: argparse.Namespace) -> None:
     _ensure_tables(settings)
 
     try:
-        summary = delete_block(args.dataset, args.block, data_dir)
+        with session_scope(settings.sqlalchemy_database_url) as db:
+            summary = delete_block(args.dataset, args.block, data_dir, db=db)
     except LoaderError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
@@ -76,7 +80,8 @@ def _cmd_delete_dataset(args: argparse.Namespace) -> None:
     _ensure_tables(settings)
 
     try:
-        summary = delete_dataset(args.dataset, data_dir, force=args.force)
+        with session_scope(settings.sqlalchemy_database_url) as db:
+            summary = delete_dataset(args.dataset, data_dir, db=db, force=args.force)
     except LoaderError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
