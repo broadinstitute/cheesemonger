@@ -113,16 +113,14 @@ Tests use temporary directories — no real data or Taiga access needed.
 
 ## API endpoints
 
+The HTTP API is **read-only**. Datasets and blocks are created, loaded, and
+deleted exclusively through the CLI loader (see [Loading & retrieving data](#loading--retrieving-data)).
 
 | Method   | Path                                 | Purpose                                 |
 | -------- | ------------------------------------ | --------------------------------------- |
 | `GET`    | `/health`                            | Service health check                    |
-| `POST`   | `/datasets`                          | Create a new dataset (define schema)    |
 | `GET`    | `/datasets`                          | List all datasets                       |
 | `GET`    | `/datasets/{dataset}`                | Get dataset metadata                    |
-| `DELETE` | `/datasets/{dataset}`                | Delete an empty dataset                 |
-| `POST`   | `/datasets/{dataset}/blocks`         | Load a block from a server-readable Zarr source |
-| `DELETE` | `/datasets/{dataset}/blocks/{block}` | Delete a block                          |
 | `GET`    | `/gene_mappings`                     | Retrieve gene mapping (entrez ↔ symbol) |
 | `POST`   | `/datasets/{dataset}/query`          | Query data                              |
 
@@ -134,7 +132,7 @@ on dev.cds.team the service sits behind oauth2_proxy.
 ## Python client
 
 [`cheesypy`](clients/cheesypy/) is a standalone client (pandas-friendly) for
-querying and loading from Python:
+querying from Python (read-only; loading is a server-side CLI task):
 
 ```python
 from cheesypy import Cheesemonger
@@ -242,11 +240,18 @@ Response gene), so pipe through `python3 -m json.tool` or slice the arrays
 client-side. See [docs/api_design.md](docs/api_design.md) for all query patterns
 (multi-block, cross-screen aggregation, diagonal).
 
-### Manage
+### Manage (delete)
+
+Deletion is a CLI operation too — the API cannot mutate data.
 
 ```bash
-curl -s -X DELETE localhost:8000/datasets/perturb-scuba/blocks/PS-SC-1   # delete a block
-curl -s -X DELETE localhost:8000/datasets/perturb-scuba                  # delete dataset (must be empty)
+# Delete a single block (DB row + Zarr directory)
+uv run python -m cheesemonger delete-block \
+  --dataset perturb-scuba --block PS-SC-1 --data-dir ./local_store
+
+# Delete a dataset. Refuses if it still has blocks unless --force removes them first.
+uv run python -m cheesemonger delete-dataset \
+  --dataset perturb-scuba --force --data-dir ./local_store
 ```
 
 ## Project structure
@@ -258,11 +263,10 @@ cheesemonger/
 │   ├── __main__.py         # CLI entrypoint (python -m cheesemonger load ...)
 │   ├── startup.py          # App factory (create_app)
 │   ├── config.py           # pydantic-settings
-│   ├── api/                # FastAPI routers (HTTP layer)
+│   ├── api/                # FastAPI routers (HTTP layer, read-only)
 │   │   ├── deps.py         # Shared dependencies (DI)
 │   │   ├── health.py
-│   │   ├── datasets.py
-│   │   ├── blocks.py
+│   │   ├── datasets.py     # GET list/detail
 │   │   ├── gene_mappings.py
 │   │   └── query.py
 │   ├── schemas/            # Pydantic request/response models

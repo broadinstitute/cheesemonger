@@ -11,7 +11,6 @@ from importlib import metadata
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from .api.blocks import router as blocks_router
 from .api.datasets import router as datasets_router
 from .api.gene_mappings import router as gene_mappings_router
 from .api.health import router as health_router
@@ -85,7 +84,6 @@ def create_app(settings: Settings) -> FastAPI:
 
     root_router.include_router(health_router)
     root_router.include_router(datasets_router)
-    root_router.include_router(blocks_router)
     root_router.include_router(gene_mappings_router)
     root_router.include_router(query_router)
 

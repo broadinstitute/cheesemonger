@@ -145,29 +145,6 @@ def test_gene_symbols_translation():
     assert list(out.index) == ["TP53", "999"]
 
 
-def test_load_posts_to_blocks():
-    captured = {}
-
-    def handler(request):
-        captured["path"] = request.url.path
-        captured["body"] = json.loads(request.content)
-        return httpx.Response(201, json={
-            "dataset": "perturb-scuba", "block": "PS-SC-1",
-            "path": "/data/perturb-scuba/blocks/PS-SC-1",
-            "dimensions": {"Timepoint": 2, "Target": 2, "Response": 14588},
-            "datatypes": ["ZScore", "L2FC"],
-        })
-
-    cm = make_client(handler)
-    out = cm.load("perturb-scuba", "PS-SC-1", "gs://bucket/PS-SC-1.zarr", create_dataset=True)
-
-    assert captured["path"] == "/datasets/perturb-scuba/blocks"
-    assert captured["body"]["source"] == "gs://bucket/PS-SC-1.zarr"
-    assert captured["body"]["block"] == "PS-SC-1"
-    assert captured["body"]["create_dataset"] is True
-    assert out["block"] == "PS-SC-1"
-
-
 def test_list_datasets_returns_dataframe():
     def handler(request):
         return httpx.Response(200, json={"datasets": [

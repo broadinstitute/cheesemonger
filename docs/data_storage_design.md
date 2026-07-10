@@ -117,7 +117,9 @@ Each block's **data** is an xarray Dataset exported as Zarr. The coordinate arra
       ...
 ```
 
-The `blocks/` subdirectory mirrors the API path structure: `DELETE /datasets/pesca/blocks/SW620` maps directly to `rm -rf /mnt/data/pesca/blocks/SW620/`.
+The `blocks/` subdirectory mirrors the dataset/block naming: the CLI
+`delete-block --dataset pesca --block SW620` maps directly to
+`rm -rf /mnt/data/pesca/blocks/SW620/`.
 
 **Why xarray-exported Zarr?** Raw Zarr has no concept of named coordinates. When Bella writes `ds.to_zarr(...)`, xarray embeds coordinate labels as separate Zarr arrays and records dimension names in `.zattrs`. When the server reads with `xr.open_zarr(...)`, it reconstructs the full labeled Dataset. This enables `.sel(timepoint=4, testedperturbation="4193")` for label-based indexing instead of manual integer-index lookups.
 

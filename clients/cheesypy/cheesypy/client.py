@@ -14,6 +14,9 @@ from .reshape import response_to_pandas
 class Cheesemonger:
     """Client for a Cheesemonger server.
 
+    The server API is read-only: datasets and blocks are created, loaded, and
+    deleted with the cheesemonger CLI on the server, not through this client.
+
     Example:
         >>> cm = Cheesemonger("https://cheesemonger.internal")
         >>> cm.series("perturb-scuba", ["ZScore", "L2FC", "FDR"],
@@ -80,16 +83,6 @@ class Cheesemonger:
     def metadata(self, dataset: str) -> dict:
         """Full metadata for a dataset (dimensions, labels, blocks, datatypes)."""
         return self._request("GET", f"/datasets/{dataset}")
-
-    def create_dataset(self, schema: dict) -> dict:
-        """Create a dataset from a schema dict (POST /datasets)."""
-        return self._request("POST", "/datasets", json=schema)
-
-    def delete_dataset(self, dataset: str) -> dict:
-        return self._request("DELETE", f"/datasets/{dataset}")
-
-    def delete_block(self, dataset: str, block: str) -> dict:
-        return self._request("DELETE", f"/datasets/{dataset}/blocks/{block}")
 
     def gene_mappings(self) -> dict:
         """Raw entrez<->symbol mapping payload from the server."""
@@ -203,30 +196,3 @@ class Cheesemonger:
     ) -> Any:
         """Diagonal query: values where the two ``dims`` share a coordinate label."""
         return self.query(dataset, datatype, select=select or None, diagonal=dims, raw=raw)
-
-    # --- write -----------------------------------------------------------
-
-    def load(
-        self,
-        dataset: str,
-        block: str,
-        source: str,
-        *,
-        create_dataset: bool = False,
-        last_dimension: str = "screen",
-        overwrite: bool = False,
-    ) -> dict:
-        """Ingest a block (POST /datasets/{dataset}/blocks).
-
-        ``source`` must be readable by the *server* (a ``gs://`` URL with the
-        server's credentials, or a server-local path) — data is not uploaded
-        through this call.
-        """
-        body = {
-            "source": source,
-            "block": block,
-            "create_dataset": create_dataset,
-            "last_dimension": last_dimension,
-            "overwrite": overwrite,
-        }
-        return self._request("POST", f"/datasets/{dataset}/blocks", json=body)

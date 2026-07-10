@@ -13,6 +13,9 @@ from .common import (
 
 
 class DatasetIn(BaseModel):
+    """A dataset schema. Built by the loader (from an inferred source store),
+    not accepted over HTTP — the API is read-only."""
+
     name: SafeName
     last_dimension: SafeName
     dimensions: list[Dimension] = Field(max_length=MAX_DIMENSIONS)
@@ -20,14 +23,6 @@ class DatasetIn(BaseModel):
     # Omitted dimensions use their full extent (a single chunk). An empty list
     # means no dimension is explicitly chunked.
     chunk_shape: list[ChunkDim] = []
-
-
-class DatasetCreated(BaseModel):
-    name: str
-    last_dimension: str
-    dimensions: int
-    datatypes: int
-    chunk_shape: list[ChunkDim]
 
 
 class DatasetSummary(BaseModel):
@@ -60,42 +55,3 @@ class DatasetDetail(BaseModel):
     blocks: list[BlockInfo]
     datatypes: list[DatatypeSpec]
     chunk_shape: list[ChunkDim]
-
-
-class DatasetDeleted(BaseModel):
-    dataset: str
-    deleted: bool = True
-
-
-class DatasetNotEmpty(BaseModel):
-    error: str = "dataset_not_empty"
-    message: str
-    blocks: list[str]
-
-
-class BlockDeleted(BaseModel):
-    block: str
-    deleted: bool = True
-
-
-class BlockLoadIn(BaseModel):
-    """Request to ingest a block from a server-readable Zarr source.
-
-    The source must be reachable by the *server* (a gs:// URL with the server's
-    credentials, or a path on the server's filesystem) — the data is not
-    uploaded through this request.
-    """
-
-    source: str
-    block: SafeName
-    create_dataset: bool = False
-    last_dimension: SafeName = "screen"
-    overwrite: bool = False
-
-
-class BlockLoaded(BaseModel):
-    dataset: str
-    block: str
-    path: str
-    dimensions: dict[str, int]
-    datatypes: list[str]

@@ -227,3 +227,86 @@ def load_block(
 
     logger.info("Loaded block %r into dataset %r", block, dataset)
     return summary
+
+
+def _open_session(db: Session | None) -> tuple[Session, bool]:
+    """Return (session, owns_session). Creates a temporary session if db is None."""
+    if db is not None:
+        return db, False
+    from cheesemonger.config import get_settings
+    from cheesemonger.db import SessionLocal
+    return SessionLocal(get_settings().sqlalchemy_database_url), True
+
+
+def delete_block(
+    dataset: str,
+    block: str,
+    data_dir: str,
+    *,
+    db: Session | None = None,
+) -> dict:
+    """Delete a block: remove its DB row and its Zarr directory on disk.
+
+    Raises LoaderError if the dataset or block does not exist. Mirrors the
+    session handling of load_block (a temporary session is opened for CLI use).
+    """
+    db, owns_session = _open_session(db)
+    try:
+        if not ds_crud.dataset_exists(db, dataset):
+            raise LoaderError(f"Dataset {dataset!r} does not exist")
+        if not ds_crud.block_exists(db, dataset, block):
+            raise LoaderError(f"Block {block!r} does not exist in dataset {dataset!r}")
+
+        ds_crud.delete_block(db, dataset, block)
+        block_path = ds_paths.block_dir(data_dir, dataset, block)
+        if block_path.exists():
+            shutil.rmtree(block_path)
+        db.commit()
+    finally:
+        if owns_session:
+            db.close()
+
+    logger.info("Deleted block %r from dataset %r", block, dataset)
+    return {"dataset": dataset, "block": block, "deleted": True}
+
+
+def delete_dataset(
+    dataset: str,
+    data_dir: str,
+    *,
+    db: Session | None = None,
+    force: bool = False,
+) -> dict:
+    """Delete a dataset and its on-disk directory.
+
+    Refuses if the dataset still has blocks unless ``force=True``, in which case
+    its blocks are deleted first (their FK is RESTRICT, so block rows must be
+    removed before the dataset row). Raises LoaderError if it doesn't exist.
+    """
+    db, owns_session = _open_session(db)
+    try:
+        if not ds_crud.dataset_exists(db, dataset):
+            raise LoaderError(f"Dataset {dataset!r} does not exist")
+
+        block_names = ds_crud.list_block_names(db, dataset)
+        if block_names and not force:
+            raise LoaderError(
+                f"Dataset {dataset!r} still has {len(block_names)} block(s): "
+                f"{', '.join(block_names)}. Delete them first or pass force=True."
+            )
+
+        for b in block_names:
+            ds_crud.delete_block(db, dataset, b)
+        ds_crud.delete_dataset(db, dataset)
+
+        # rmtree the dataset dir removes the blocks/ subtree in one shot.
+        ds_dir = ds_paths.dataset_dir(data_dir, dataset)
+        if ds_dir.exists():
+            shutil.rmtree(ds_dir)
+        db.commit()
+    finally:
+        if owns_session:
+            db.close()
+
+    logger.info("Deleted dataset %r (%d block(s))", dataset, len(block_names))
+    return {"dataset": dataset, "deleted": True, "blocks_deleted": len(block_names)}

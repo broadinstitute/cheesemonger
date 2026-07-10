@@ -3,12 +3,13 @@
 Usage:
     python -m cheesemonger load --source gs://bucket/PS-SC-1_degs.zarr \
         --dataset perturb-scuba --block PS-SC-1 --create-dataset
+    python -m cheesemonger delete-block --dataset perturb-scuba --block PS-SC-1
+    python -m cheesemonger delete-dataset --dataset perturb-scuba --force
 
-The CLI handles data loading (copying/validating xarray-exported Zarr stores
-into the dataset's block directory). Source data is written by
+All data mutations (create/load/delete of datasets and blocks) happen here, not
+over HTTP — the REST API is read-only. Source data is written by
 xarray.Dataset.to_zarr() and contains both data variables and coordinate
-arrays. This is separate from the REST API because block loads are infrequent
-admin operations, not user-facing requests.
+arrays. These are infrequent admin operations, not user-facing requests.
 """
 
 from __future__ import annotations
@@ -18,17 +19,20 @@ import logging
 import sys
 
 from .config import get_settings
-from .services.loader import LoaderError, load_block
+from .services.loader import LoaderError, delete_block, delete_dataset, load_block
+
+
+def _ensure_tables(settings) -> None:
+    """Create DB tables if they don't exist yet (admin commands run standalone)."""
+    from .db import get_engine
+    from .models.base import Base
+    Base.metadata.create_all(bind=get_engine(settings.sqlalchemy_database_url))
 
 
 def _cmd_load(args: argparse.Namespace) -> None:
     settings = get_settings()
     data_dir = args.data_dir or settings.data_dir
-
-    # Ensure DB tables exist before loading
-    from .db import get_engine
-    from .models.base import Base
-    Base.metadata.create_all(bind=get_engine(settings.sqlalchemy_database_url))
+    _ensure_tables(settings)
 
     try:
         summary = load_block(
@@ -49,6 +53,37 @@ def _cmd_load(args: argparse.Namespace) -> None:
         f"  path:       {summary['path']}\n"
         f"  dimensions: {summary['dimensions']}\n"
         f"  datatypes:  {len(summary['datatypes'])} ({', '.join(summary['datatypes'])})"
+    )
+
+
+def _cmd_delete_block(args: argparse.Namespace) -> None:
+    settings = get_settings()
+    data_dir = args.data_dir or settings.data_dir
+    _ensure_tables(settings)
+
+    try:
+        summary = delete_block(args.dataset, args.block, data_dir)
+    except LoaderError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Deleted block '{summary['block']}' from dataset '{summary['dataset']}'")
+
+
+def _cmd_delete_dataset(args: argparse.Namespace) -> None:
+    settings = get_settings()
+    data_dir = args.data_dir or settings.data_dir
+    _ensure_tables(settings)
+
+    try:
+        summary = delete_dataset(args.dataset, data_dir, force=args.force)
+    except LoaderError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(
+        f"Deleted dataset '{summary['dataset']}' "
+        f"({summary['blocks_deleted']} block(s) removed)"
     )
 
 
@@ -82,6 +117,31 @@ def main() -> None:
         help="Replace the block if it already exists",
     )
     load_parser.set_defaults(func=_cmd_load)
+
+    del_block_parser = subparsers.add_parser(
+        "delete-block", help="Delete a block (DB row + Zarr directory)"
+    )
+    del_block_parser.add_argument("--dataset", required=True, help="Dataset name")
+    del_block_parser.add_argument("--block", required=True, help="Block name to delete")
+    del_block_parser.add_argument(
+        "--data-dir", default=None,
+        help="Data root (default: DATA_DIR from settings/.env)",
+    )
+    del_block_parser.set_defaults(func=_cmd_delete_block)
+
+    del_ds_parser = subparsers.add_parser(
+        "delete-dataset", help="Delete a dataset (DB row + Zarr directory)"
+    )
+    del_ds_parser.add_argument("--dataset", required=True, help="Dataset name to delete")
+    del_ds_parser.add_argument(
+        "--data-dir", default=None,
+        help="Data root (default: DATA_DIR from settings/.env)",
+    )
+    del_ds_parser.add_argument(
+        "--force", action="store_true",
+        help="Delete the dataset's blocks first (otherwise refuse if any remain)",
+    )
+    del_ds_parser.set_defaults(func=_cmd_delete_dataset)
 
     args = parser.parse_args()
     if not hasattr(args, "func"):

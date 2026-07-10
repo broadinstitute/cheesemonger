@@ -8,27 +8,24 @@
 
 ## API Overview
 
-Nine endpoints. All request and response bodies are JSON.
+Five endpoints, all **read-only**. All request and response bodies are JSON.
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/health` | Service health check |
-| `POST` | `/datasets` | Create a new dataset (define schema) |
 | `GET` | `/datasets` | List all datasets |
 | `GET` | `/datasets/{dataset}` | Get dataset metadata |
-| `DELETE` | `/datasets/{dataset}` | Delete an empty dataset (all blocks must be deleted first) |
-| `POST` | `/datasets/{dataset}/blocks` | Load a block from a server-readable Zarr source |
-| `DELETE` | `/datasets/{dataset}/blocks/{block}` | Delete a block |
 | `GET` | `/gene_mappings` | Get the gene mappings (entrez ↔ symbol) |
-| `POST` | `/datasets/{dataset}/query` | Query data |
+| `POST` | `/datasets/{dataset}/query` | Query data (read; `POST` only to carry a JSON body) |
 
-Block loading can be done two ways, both backed by the same loader: the CLI
-(`python -m cheesemonger load`, for admins on the server) or the
-`POST /datasets/{dataset}/blocks` endpoint (for remote clients, e.g. `cheesypy`).
+**Mutations are not exposed over HTTP.** Creating a dataset, loading a block,
+deleting a block, and deleting a dataset all happen through the CLI loader on the
+server — see [Data mutations (CLI)](#data-mutations-cli) below. This keeps the
+service surface read-only: a client can never alter stored data.
 
 > **Note:** there is currently no authentication (see `docs/planning.md`). On
 > dev.cds.team the service sits behind oauth2_proxy (Broad OAuth), which gates
-> all of these — including the ingest endpoint — at the network edge.
+> all of these at the network edge.
 
 ---
 
@@ -162,84 +159,6 @@ class IndexLevel(BaseModel):
 
 ---
 
-### `POST /datasets`
-
-Create a new dataset by defining its schema. This must be called before any blocks can be loaded. The schema declares the dimensions, their coordinate labels, the datatypes that will be stored, and the chunk shape for storage.
-
-**Request body**
-
-```json
-{
-  "name": "pesca",
-  "last_dimension": "screen",
-  "dimensions": [
-    {"name": "timepoint", "labels": [4, 7]},
-    {"name": "testedperturbation", "labels": ["103", "226", "672", "...", "100204"]},
-    {"name": "testedgeneexpression", "labels": ["103", "226", "672", "...", "100204"]}
-  ],
-  "datatypes": [
-    {"name": "ZScore", "dimensions": ["timepoint", "testedperturbation", "testedgeneexpression"]},
-    {"name": "L2FC", "dimensions": ["timepoint", "testedperturbation", "testedgeneexpression"]},
-    {"name": "FDR", "dimensions": ["timepoint", "testedperturbation", "testedgeneexpression"]},
-    {"name": "neg_log10_FDR", "dimensions": ["timepoint", "testedperturbation", "testedgeneexpression"]},
-    {"name": "MeanDifference", "dimensions": ["timepoint", "testedperturbation", "testedgeneexpression"]},
-    {"name": "DetrendedMeanDifference", "dimensions": ["timepoint", "testedperturbation", "testedgeneexpression"]},
-    {"name": "STD", "dimensions": ["timepoint", "testedperturbation", "testedgeneexpression"]},
-    {"name": "PermutationP", "dimensions": ["timepoint", "testedperturbation", "testedgeneexpression"]},
-    {"name": "nNonzeroTestCells", "dimensions": ["timepoint", "testedperturbation"]},
-    {"name": "TestMean", "dimensions": ["timepoint", "testedperturbation"]},
-    {"name": "nTestCells", "dimensions": ["timepoint", "testedperturbation"]},
-    {"name": "nPermutations", "dimensions": ["timepoint", "testedperturbation"]},
-    {"name": "nNonzeroCtrlCells", "dimensions": ["timepoint"]},
-    {"name": "CtrlMean", "dimensions": ["timepoint"]},
-    {"name": "nCtrlCells", "dimensions": ["timepoint"]}
-  ],
-  "chunk_shape": [
-    {"name": "testedperturbation", "size": 1000},
-    {"name": "testedgeneexpression", "size": 5000}
-  ]
-}
-```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | yes | Dataset name. E.g. `pesca`. |
-| `last_dimension` | string | yes | The name of the organizational key (e.g. `"screen"`). Stored as folders on disk, not as an array axis. Not listed in `dimensions`. In queries, it behaves like any other dimension. |
-| `dimensions` | list[Dimension] | yes | Each key is a dimension name, value contains labels (the coordinate array). |
-| `datatypes` | list[DatatypeSpec] | yes | Each entry has a name and dimensions (which dims this array spans). This matters because not all datatypes have the same shape. `dtype` defaults to `float32`. |
-| `chunk_shape` | list[ChunkDim] | no | Chunk size per dimension. Omitted dimensions default to the full extent. Default: big chunks `(1000, 5000)`. |
-
-Notes:
-
-- `last_dimension` names the organizational key. It does not appear in `dimensions` or in any datatype's dimension list because it's a folder on disk, not an array axis. Its values are created via the CLI `load` command.
-- In queries, `last_dimension` is treated like any other dimension: it can appear in `select`, be used as `aggregate.over`, etc. The server internally routes it to folder selection instead of array indexing.
-- `chunk_shape` only needs entries for dimensions that should be chunked. Dimensions like `timepoint` (size 2) are small enough to fit in a single chunk.
-- The schema is immutable after creation. To change dimensions or datatypes, delete and re-create the dataset.
-
-**Response** `201 Created`
-
-```json
-{
-  "name": "pesca",
-  "last_dimension": "screen",
-  "dimensions": 3,
-  "datatypes": 15,
-  "chunk_shape": [
-    {"name": "testedperturbation", "size": 1000},
-    {"name": "testedgeneexpression", "size": 5000}
-  ]
-}
-```
-
-**Error cases**
-
-| Status | Condition |
-|--------|-----------|
-| `409 Conflict` | A dataset with this name already exists |
-| `400 Bad Request` | Missing required fields, empty labels, or datatype references unknown dimension |
-
----
-
 ### `GET /datasets`
 
 List all datasets available on this server.
@@ -262,7 +181,7 @@ List all datasets available on this server.
 
 ### `GET /datasets/{dataset}`
 
-Full metadata for a dataset. Returns the same structure as `POST /datasets` plus runtime fields: loaded blocks and dimension sizes.
+Full metadata for a dataset: its schema (dimensions, datatypes, chunk shape) plus runtime fields — loaded blocks and dimension sizes.
 
 **Response** `200 OK`
 
@@ -310,108 +229,35 @@ Notes:
 
 ---
 
-### `DELETE /datasets/{dataset}`
+### Data mutations (CLI)
 
-Delete a dataset and its schema. All blocks must be deleted first, the dataset must be empty.
+All writes — creating a dataset, loading a block, deleting a block, deleting a
+dataset — are performed with the CLI loader on the server, not over HTTP. This is
+deliberate: the HTTP surface is read-only, so no client can alter stored data.
+The commands run on the machine that has the data volume mounted and (for
+`gs://` sources) the storage credentials.
 
-**Response** `200 OK`
+```bash
+# Load a block. The first block into a new dataset also creates it, inferring
+# the schema (dimensions, labels, datatypes) from the source store.
+python -m cheesemonger load \
+    --source gs://.../PS-SC-1_degs_broadcast.zarr \
+    --dataset perturb-scuba --block PS-SC-1 --create-dataset
 
-```json
-{
-  "dataset": "pesca",
-  "deleted": true
-}
+# Delete a single block (removes its DB row and its Zarr directory).
+python -m cheesemonger delete-block --dataset perturb-scuba --block PS-SC-1
+
+# Delete a dataset. Refuses if it still has blocks unless --force removes them first.
+python -m cheesemonger delete-dataset --dataset perturb-scuba --force
 ```
 
-**Error cases**
+| Command | Key flags | Notes |
+|---------|-----------|-------|
+| `load` | `--source`, `--dataset`, `--block`, `--create-dataset`, `--last-dimension`, `--overwrite` | Loads/overwrites a block; infers + creates the dataset with `--create-dataset` |
+| `delete-block` | `--dataset`, `--block` | Errors if the dataset or block doesn't exist |
+| `delete-dataset` | `--dataset`, `--force` | Without `--force`, refuses when blocks remain; with it, deletes all blocks first |
 
-| Status | Condition |
-|--------|-----------|
-| `404 Not Found` | Dataset doesn't exist |
-| `409 Conflict` | Dataset still has blocks. Delete all blocks first. |
-
-`409` response body:
-
-```json
-{
-  "error": "dataset_not_empty",
-  "message": "Dataset 'pesca' still has 30 block(s). Delete all blocks before deleting the dataset.",
-  "blocks": ["SW620", "HT29", "A549", "..."]
-}
-```
-
----
-
-### `POST /datasets/{dataset}/blocks`
-
-Load a block from a Zarr source the **server** can read. Data is not uploaded
-through the request — the body names a location (a `gs://` URL the server has
-credentials for, or a path on the server's filesystem). Runs the same loader as
-the CLI. Synchronous for v1 (the handler runs in a worker thread; very large
-sources should move to a background job — see `docs/planning.md`).
-
-**Request body**
-
-```json
-{
-  "source": "gs://cds_perturbseq_datasets/perturb-scuba/PS-SC-1_degs_broadcast.zarr",
-  "block": "PS-SC-1",
-  "create_dataset": true,
-  "last_dimension": "screen",
-  "overwrite": false
-}
-```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `source` | string | yes | Server-readable Zarr store (`gs://…` or server path) |
-| `block` | string | yes | Block name (one value of the last dimension, e.g. a screen ID) |
-| `create_dataset` | bool | no | Infer + create the dataset schema if it doesn't exist (default `false`) |
-| `last_dimension` | string | no | Block-key name when creating (default `"screen"`) |
-| `overwrite` | bool | no | Replace the block if it already exists (default `false`) |
-
-**Response** `201 Created`
-
-```json
-{
-  "dataset": "perturb-scuba",
-  "block": "PS-SC-1",
-  "path": "/mnt/data/perturb-scuba/blocks/PS-SC-1",
-  "dimensions": {"Timepoint": 2, "Target": 2, "Response": 14588},
-  "datatypes": ["ZScore", "L2FC", "FDR", "..."]
-}
-```
-
-**Error cases**
-
-| Status | Condition |
-|--------|-----------|
-| `422 Unprocessable Entity` | Source unreadable, dataset missing without `create_dataset`, block exists without `overwrite`, or source not declared in the schema |
-
-> The current query engine expects the **broadcasted** store form (every
-> datatype spans all dimensions). Unbroadcasted stores load but aren't fully
-> queryable yet (see `docs/planning.md`).
-
----
-
-### `DELETE /datasets/{dataset}/blocks/{block}`
-
-Remove a block and all its data from the dataset.
-
-**Response** `200 OK`
-
-```json
-{
-  "block": "MCF7",
-  "deleted": true
-}
-```
-
-**Error cases**
-
-| Status | Condition |
-|--------|-----------|
-| `404 Not Found` | Block does not exist |
+All three accept `--data-dir` (defaults to `DATA_DIR` from settings/`.env`).
 
 ---
 

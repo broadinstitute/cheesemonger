@@ -1,8 +1,9 @@
 """End-to-end query-engine tests.
 
-Each test creates a dataset via the API, writes one or more blocks as
-xarray-exported Zarr stores directly into the dataset's blocks/ directory,
-registers them in the DB, then exercises POST /datasets/{ds}/query.
+Each test creates a dataset via the crud layer (the API is read-only), writes
+one or more blocks as xarray-exported Zarr stores directly into the dataset's
+blocks/ directory, registers them in the DB, then exercises
+POST /datasets/{ds}/query.
 
 Block data is deterministic (arange-based) so aggregation results can be
 asserted exactly.
@@ -14,6 +15,7 @@ import numpy as np
 import xarray as xr
 
 from cheesemonger.crud import dataset as ds_crud
+from cheesemonger.schemas.dataset import DatasetIn
 
 TP = [4, 7]
 PERT = ["103", "226", "672"]
@@ -62,7 +64,8 @@ def _block(zscore: np.ndarray, l2fc: np.ndarray) -> xr.Dataset:
 
 
 def _setup(client, settings, db, blocks: dict[str, xr.Dataset]) -> None:
-    assert client.post("/datasets", json=SCHEMA).status_code == 201
+    # Datasets are created via the loader/crud, not the API (which is read-only).
+    ds_crud.create_dataset(db, DatasetIn(**SCHEMA))
     for name, ds in blocks.items():
         block_path = Path(settings.data_dir) / "pesca" / "blocks" / name
         block_path.mkdir(parents=True, exist_ok=True)

@@ -15,7 +15,12 @@ from sqlalchemy.orm import sessionmaker
 from cheesemonger.crud import dataset as ds_crud
 from cheesemonger.models.base import Base
 from cheesemonger.schemas.query import QueryIn, Selection
-from cheesemonger.services.loader import LoaderError, load_block
+from cheesemonger.services.loader import (
+    LoaderError,
+    delete_block,
+    delete_dataset,
+    load_block,
+)
 from cheesemonger.services.query import QueryService
 
 TP = ["D4", "D7"]
@@ -155,3 +160,80 @@ def test_last_dimension_collision_is_rejected(tmp_path, loader_db):
     with pytest.raises(LoaderError, match="must not be one of the source"):
         load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db,
                    last_dimension="Target", create_dataset=True)
+
+
+# --- Deletion --------------------------------------------------------------
+
+
+def test_delete_block_removes_row_and_dir(tmp_path, loader_db):
+    source = _source_store(tmp_path)
+    data_dir = str(tmp_path / "data")
+    load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db, create_dataset=True)
+    load_block(source, "ds1", "PS-SC-2", data_dir, db=loader_db)
+
+    block_path = Path(data_dir) / "ds1" / "blocks" / "PS-SC-1"
+    assert block_path.exists()
+
+    summary = delete_block("ds1", "PS-SC-1", data_dir, db=loader_db)
+    assert summary == {"dataset": "ds1", "block": "PS-SC-1", "deleted": True}
+    assert not block_path.exists()
+    # The dataset and its other block survive.
+    assert ds_crud.list_block_names(loader_db, "ds1") == ["PS-SC-2"]
+    assert ds_crud.dataset_exists(loader_db, "ds1")
+
+
+def test_delete_missing_block_or_dataset_errors(tmp_path, loader_db):
+    data_dir = str(tmp_path / "data")
+    with pytest.raises(LoaderError, match="Dataset 'nope' does not exist"):
+        delete_block("nope", "PS-SC-1", data_dir, db=loader_db)
+
+    source = _source_store(tmp_path)
+    load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db, create_dataset=True)
+    with pytest.raises(LoaderError, match="Block 'ghost' does not exist"):
+        delete_block("ds1", "ghost", data_dir, db=loader_db)
+
+
+def test_delete_dataset_refuses_when_blocks_remain(tmp_path, loader_db):
+    source = _source_store(tmp_path)
+    data_dir = str(tmp_path / "data")
+    load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db, create_dataset=True)
+
+    with pytest.raises(LoaderError, match="still has 1 block"):
+        delete_dataset("ds1", data_dir, db=loader_db)
+    # Nothing was removed.
+    assert ds_crud.dataset_exists(loader_db, "ds1")
+    assert (Path(data_dir) / "ds1" / "blocks" / "PS-SC-1").exists()
+
+
+def test_delete_dataset_force_removes_everything(tmp_path, loader_db):
+    source = _source_store(tmp_path)
+    data_dir = str(tmp_path / "data")
+    load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db, create_dataset=True)
+    load_block(source, "ds1", "PS-SC-2", data_dir, db=loader_db)
+
+    summary = delete_dataset("ds1", data_dir, db=loader_db, force=True)
+    assert summary == {"dataset": "ds1", "deleted": True, "blocks_deleted": 2}
+    assert not ds_crud.dataset_exists(loader_db, "ds1")
+    assert not (Path(data_dir) / "ds1").exists()
+
+
+def test_delete_empty_dataset(tmp_path, loader_db):
+    from cheesemonger.schemas.dataset import DatasetIn
+
+    ds_crud.create_dataset(loader_db, DatasetIn(
+        name="empty", last_dimension="screen",
+        dimensions=[{"name": "Timepoint", "labels": TP}],
+        datatypes=[{"name": "X", "dimensions": ["Timepoint"]}],
+    ))
+    loader_db.commit()
+    data_dir = str(tmp_path / "data")
+
+    summary = delete_dataset("empty", data_dir, db=loader_db)
+    assert summary["blocks_deleted"] == 0
+    assert not ds_crud.dataset_exists(loader_db, "empty")
+
+
+def test_delete_missing_dataset_errors(tmp_path, loader_db):
+    data_dir = str(tmp_path / "data")
+    with pytest.raises(LoaderError, match="does not exist"):
+        delete_dataset("nope", data_dir, db=loader_db)

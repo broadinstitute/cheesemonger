@@ -161,23 +161,15 @@ You can also fetch the raw mapping yourself: `cm.gene_mappings()`.
 
 ## Loading data
 
-Ingest a block from a source the **server** can read — a `gs://` URL (with the
-server's credentials) or a path on the server's filesystem. Data is not uploaded
-through the client; you hand the server a location to read from.
+The client is **read-only** — it cannot create, load, or delete datasets and
+blocks. Those are admin operations run with the cheesemonger CLI on the server:
 
-```python
-cm.load(
-    "perturb-scuba", "PS-SC-1",
-    source="gs://cds_perturbseq_datasets/perturb-scuba/PS-SC-1_degs_broadcast.zarr",
-    create_dataset=True,     # infer + create the dataset schema if it's new
-)
+```bash
+python -m cheesemonger load --source gs://.../PS-SC-1_degs_broadcast.zarr \
+    --dataset perturb-scuba --block PS-SC-1 --create-dataset
+python -m cheesemonger delete-block   --dataset perturb-scuba --block PS-SC-1
+python -m cheesemonger delete-dataset --dataset perturb-scuba --force
 ```
-
-Other options: `last_dimension="screen"` (block-key name when creating) and
-`overwrite=True` (replace an existing block).
-
-> Admins can also load from the server itself with the CLI:
-> `python -m cheesemonger load --source … --dataset … --block … --create-dataset`.
 
 ## Errors
 
