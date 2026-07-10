@@ -117,6 +117,55 @@ def test_loaded_block_is_queryable(tmp_path, loader_db):
     assert out.data["ZScore"] == pytest.approx(expected)
 
 
+def test_unbroadcasted_store_loads_and_queries(tmp_path, loader_db):
+    """A store with reduced-rank datatypes loads faithfully and is queryable
+    even when a query fixes a dimension a datatype doesn't have."""
+    dims3 = ["Timepoint", "Target", "Response"]
+    coords3 = {"Timepoint": TP, "Target": TARGET, "Response": RESPONSE}
+    src = xr.Dataset(
+        {
+            # Full-rank
+            "ZScore": xr.DataArray(
+                np.arange(16).reshape(2, 2, 4).astype("float32"), dims=dims3, coords=coords3
+            ),
+            # Reduced-rank: no Target axis (the unbroadcasted form)
+            "CtrlMean": xr.DataArray(
+                np.array([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], dtype="float32"),
+                dims=["Timepoint", "Response"],
+                coords={"Timepoint": TP, "Response": RESPONSE},
+            ),
+        }
+    )
+    src_path = tmp_path / "src" / "unbroadcast.zarr"
+    src.to_zarr(src_path, mode="w")
+    data_dir = str(tmp_path / "data")
+
+    load_block(str(src_path), "ds1", "PS-SC-1", data_dir, db=loader_db, create_dataset=True)
+
+    # CtrlMean lacks Target; the schema records that faithfully.
+    schema = ds_crud.get_schema_dict(loader_db, "ds1")
+    ctrl = next(d for d in schema["datatypes"] if d["name"] == "CtrlMean")
+    assert ctrl["dimensions"] == ["Timepoint", "Response"]
+
+    # Querying CtrlMean while fixing Target must succeed (Target is ignored).
+    qs = QueryService(thread_pool_size=1)
+    out = qs.execute(
+        QueryIn(
+            datatype="CtrlMean",
+            select=[
+                Selection(dimension="screen", value="PS-SC-1"),
+                Selection(dimension="Timepoint", value="D4"),
+                Selection(dimension="Target", value="23293"),  # not a CtrlMean dim
+            ],
+        ),
+        schema=schema,
+        block_names=["PS-SC-1"],
+        get_block_path=lambda b: Path(data_dir) / "ds1" / "blocks" / b,
+    )
+    assert [lvl.dimension for lvl in out.index] == ["Response"]
+    assert out.data["CtrlMean"] == pytest.approx([1.0, 2.0, 3.0, 4.0])
+
+
 def test_load_missing_dataset_without_create_errors(tmp_path, loader_db):
     source = _source_store(tmp_path)
     data_dir = str(tmp_path / "data")

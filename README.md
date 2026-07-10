@@ -191,10 +191,10 @@ destination is still your local/PD `--data-dir`. On disk you get
 `./local_store/perturb-scuba/schema.json` and
 `./local_store/perturb-scuba/blocks/PS-SC-1/`.
 
-> **Note:** the loader currently expects the **broadcasted** store form (every
-> datatype spans all dimensions). An unbroadcasted store still loads, but queries
-> that fix a dimension a reduced-rank datatype lacks aren't supported yet
-> (tracked as `TODO(unbroadcast)`).
+> **Note:** both **broadcasted** and **unbroadcasted** stores work. Reduced-rank
+> datatypes (those that span only some dimensions, e.g. `CtrlMean` over
+> `[Timepoint, Response]`) load faithfully and are queryable — a query that fixes
+> a dimension such a datatype lacks simply ignores it for that datatype.
 
 ### Retrieve (query)
 

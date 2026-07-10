@@ -70,14 +70,14 @@ def _read_datatype_from_ds(
     if diagonal:
         return _read_diagonal(da, array_selections, diagonal)
 
-    # TODO(unbroadcast): this applies every selection to the datatype, so it
-    # requires the "broadcasted" store form where each datatype spans all dims.
-    # To support the storage-efficient unbroadcasted delivery, skip selections
-    # for dims this datatype doesn't have (e.g. {k: v for k, v in
-    # array_selections.items() if k in da.dims}) rather than erroring.
+    # Only apply selections for dims this datatype actually has. Reduced-rank
+    # datatypes (the storage-efficient "unbroadcasted" form, e.g. CtrlMean over
+    # ["Timepoint"]) simply don't vary along the dims they omit, so fixing such
+    # a dim is a no-op for them rather than an error.
+    applicable = {k: v for k, v in array_selections.items() if k in da.dims}
     try:
-        if array_selections:
-            da = da.sel(array_selections)
+        if applicable:
+            da = da.sel(applicable)
     except KeyError as e:
         raise QueryError(f"Selection error: {e}") from e
 
@@ -111,8 +111,11 @@ def _read_diagonal(
     # diagonal query and will be slower.
     dim_a, dim_b = diagonal
 
-    if array_selections:
-        da = da.sel(array_selections)
+    # Same reduced-rank tolerance as the main read path: skip selections for
+    # dims this datatype doesn't have.
+    applicable = {k: v for k, v in array_selections.items() if k in da.dims}
+    if applicable:
+        da = da.sel(applicable)
 
     labels_a = [str(lbl) for lbl in da.coords[dim_a].values]
     labels_b = [str(lbl) for lbl in da.coords[dim_b].values]

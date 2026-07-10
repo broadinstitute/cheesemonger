@@ -241,6 +241,28 @@ def test_reduced_rank_datatype(client, settings, db):
     assert body["data"]["nCtrlCells"] == 200.0
 
 
+def test_reduced_rank_ignores_inapplicable_selection(client, settings, db):
+    """Fixing a dim a reduced-rank datatype lacks is a no-op, not an error.
+
+    This is the unbroadcasted-store case: nCtrlCells spans only [timepoint], so
+    fixing testedperturbation (which it doesn't have) is simply ignored.
+    """
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
+
+    r = _query(client, {
+        "datatype": "nCtrlCells",
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "timepoint", "value": 7},
+            {"dimension": "testedperturbation", "value": "226"},  # not a nCtrlCells dim
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["shape"] == []
+    assert body["data"]["nCtrlCells"] == 200.0
+
+
 # --- Validation (the bugs that motivated these fixes) ----------------------
 
 

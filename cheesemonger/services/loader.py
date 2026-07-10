@@ -5,16 +5,13 @@ source is a Zarr store written by xarray.Dataset.to_zarr(); it may live on the
 local filesystem or in cloud storage (``gs://`` URLs, via gcsfs). The store is
 copied into ``{data_dir}/{dataset}/blocks/{block}/`` where the API reads it.
 
-The store is loaded faithfully (as delivered). Note the query engine currently
-requires each queried datatype to span every selected dimension — i.e. the
-"broadcasted" form. A faithfully-loaded *unbroadcasted* store still loads, but
-queries that fix a dimension a reduced-rank datatype doesn't have will be
-rejected until the engine supports unbroadcasted stores (see
-services/query.py TODO(unbroadcast)).
+The store is loaded faithfully (as delivered), including the storage-efficient
+*unbroadcasted* form where reduced-rank datatypes span only the dims they vary
+along (e.g. CtrlMean over ["Timepoint", "Response"], not the full grid). The
+query engine handles this: a selection on a dim a datatype lacks is ignored for
+that datatype rather than erroring (see services/query.py). No broadcast-on-load
+is needed.
 
-TODO(unbroadcast): optionally broadcast-on-load, or (better) teach the query
-engine to ignore selections for dims a datatype lacks, so we can ingest the
-storage-efficient unbroadcasted delivery directly.
 TODO(per-block-coords): schema dimension labels are dataset-level, but blocks
 (screens) legitimately differ in their Target/Response label sets. Revisit how
 per-block coordinate labels feed the query response index for multi-screen

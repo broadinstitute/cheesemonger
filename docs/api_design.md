@@ -254,7 +254,7 @@ The commands run on the machine that has the data volume mounted and (for
 # Load a block. The first block into a new dataset also creates it, inferring
 # the schema (dimensions, labels, datatypes) from the source store.
 python -m cheesemonger load \
-    --source gs://.../PS-SC-1_degs_broadcast.zarr \
+    --source gs://.../PS-SC-1_degs.zarr \
     --dataset perturb-scuba --block PS-SC-1 --create-dataset
 
 # Delete a single block (removes its DB row and its Zarr directory).
