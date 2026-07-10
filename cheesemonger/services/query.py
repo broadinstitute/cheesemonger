@@ -49,6 +49,41 @@ def _numpy_to_json(arr: np.ndarray) -> list | float | int | None:
     return arr.tolist()
 
 
+def _aggregate_array(arr: np.ndarray, axis: int, aggregate: AggregateSpec) -> np.ndarray:
+    """Reduce ``arr`` along ``axis`` per the aggregation spec.
+
+    Shared by within-block reduction (a datatype's own axis) and cross-block
+    reduction (the stacked-blocks axis), so both paths behave identically. NaNs
+    are ignored by mean/median/min/max/count, and never satisfy the threshold
+    predicates.
+    """
+    t = aggregate.type
+    if t == "mean":
+        return np.nanmean(arr, axis=axis)
+    if t == "median":
+        return np.nanmedian(arr, axis=axis)
+    if t == "min":
+        return np.nanmin(arr, axis=axis)
+    if t == "max":
+        return np.nanmax(arr, axis=axis)
+    if t == "count":
+        # Count of non-NaN values (integer arrays have no NaN → count all).
+        if np.issubdtype(arr.dtype, np.floating):
+            valid = ~np.isnan(arr)
+        else:
+            valid = np.ones(arr.shape, dtype=bool)
+        return np.sum(valid, axis=axis)
+    if aggregate.threshold is None:
+        raise QueryError(f"{t} requires a threshold")
+    if t == "count_lt":
+        return np.sum(arr < aggregate.threshold, axis=axis)
+    if t == "count_gt":
+        return np.sum(arr > aggregate.threshold, axis=axis)
+    if t == "abs_gt":
+        return np.sum(np.abs(arr) > aggregate.threshold, axis=axis)
+    raise QueryError(f"Unknown aggregation type: {t}")
+
+
 def _read_datatype_from_ds(
     ds: xr.Dataset,
     datatype: str,
@@ -96,12 +131,7 @@ def _read_datatype_from_ds(
 
     if aggregate and aggregate.over in da.dims:
         agg_axis = list(da.dims).index(aggregate.over)
-        if aggregate.type == "mean":
-            arr = np.nanmean(arr, axis=agg_axis)
-        elif aggregate.type == "count_lt":
-            if aggregate.threshold is None:
-                raise QueryError("count_lt requires a threshold")
-            arr = np.sum(arr < aggregate.threshold, axis=agg_axis)
+        arr = _aggregate_array(arr, agg_axis, aggregate)
 
     return arr
 
@@ -260,28 +290,17 @@ class QueryService:
         diagonal: tuple[str, str] | None,
         dt_spec: dict | None,
     ) -> QueryOut:
-        """Aggregate raw values across blocks (mean or count_lt).
+        """Aggregate raw values across blocks.
 
-        Collects raw per-block arrays, stacks them along axis 0, then
-        applies the aggregation once — never mean-of-means.
+        Collects raw per-block arrays, stacks them along axis 0, then applies the
+        aggregation once — never mean-of-means (or median-of-medians, etc.).
         """
         data: dict[str, list | float | int | None] = {}
         sample_arr = None
 
         for dt in datatypes:
             stacked = np.stack([all_results[b][dt] for b in target_blocks])
-            if aggregate.type == "mean":
-                agg_result = np.nanmean(stacked, axis=0)
-            elif aggregate.type == "count_lt":
-                if aggregate.threshold is None:
-                    raise QueryError("count_lt requires a threshold")
-                stacked_mask = np.stack([
-                    all_results[b][dt] < aggregate.threshold
-                    for b in target_blocks
-                ])
-                agg_result = np.sum(stacked_mask, axis=0)
-            else:
-                raise QueryError(f"Unknown aggregation type: {aggregate.type}")
+            agg_result = _aggregate_array(stacked, 0, aggregate)
             data[dt] = _numpy_to_json(agg_result)
             if sample_arr is None:
                 sample_arr = agg_result

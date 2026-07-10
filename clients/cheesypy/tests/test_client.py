@@ -145,6 +145,53 @@ def test_gene_symbols_translation():
     assert list(out.index) == ["TP53", "999"]
 
 
+def test_unknown_symbol_gets_helpful_hint():
+    """A value that isn't a known symbol (sent as-is) yields a clear hint,
+    while legitimate non-gene labels (timepoints, screen) are not flagged."""
+    def handler(request):
+        if request.url.path == "/gene_mappings":
+            return httpx.Response(200, json={
+                "name": "gene_mappings", "taiga_id": "x", "entries_count": 1,
+                "entries": {"23293": "SMG6"},
+            })
+        # Server rejects the untranslated Target value.
+        return httpx.Response(422, json={
+            "detail": "Selection value(s) not found in dataset: Target='Q9BXS5'"
+        })
+
+    cm = make_client(handler, gene_symbols=True)
+    with pytest.raises(QueryError) as exc:
+        cm.series("perturb-scuba", "ZScore", screen="PS-SC-1", Timepoint="D4", Target="Q9BXS5")
+
+    msg = str(exc.value)
+    assert "Q9BXS5" in msg
+    assert "not recognized as a gene symbol" in msg
+    # Non-gene passthrough labels must NOT be flagged as bad symbols.
+    assert "D4" not in msg.split("not recognized")[1]
+    assert "PS-SC-1" not in msg.split("not recognized")[1]
+
+
+def test_known_symbol_is_translated_before_send():
+    captured = {}
+
+    def handler(request):
+        if request.url.path == "/gene_mappings":
+            return httpx.Response(200, json={
+                "name": "gene_mappings", "taiga_id": "x", "entries_count": 1,
+                "entries": {"23293": "SMG6"},
+            })
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "blocks": ["PS-SC-1"], "aggregation": None, "shape": [1],
+            "index": [{"dimension": "Response", "labels": ["7157"]}],
+            "data": {"ZScore": [1.0]},
+        })
+
+    cm = make_client(handler, gene_symbols=True)
+    cm.series("perturb-scuba", "ZScore", screen="PS-SC-1", Timepoint="D4", Target="SMG6")
+    assert {"dimension": "Target", "value": "23293"} in captured["body"]["select"]
+
+
 def test_list_datasets_returns_dataframe():
     def handler(request):
         return httpx.Response(200, json={"datasets": [

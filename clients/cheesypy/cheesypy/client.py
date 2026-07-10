@@ -131,21 +131,44 @@ class Cheesemonger:
             select: ``{dimension: value}`` fixed selections. Include the block
                 key (e.g. ``screen``) here to target one block; omit it to span
                 all blocks.
-            aggregate: ``{"type": "mean"|"count_lt", "over": dim, "threshold": x}``.
+            aggregate: ``{"type": "mean"|"median"|"min"|"max"|"count"|"count_lt"|
+                "count_gt"|"abs_gt", "over": dim, "threshold": x}``. ``threshold``
+                is required for the ``count_lt``/``count_gt``/``abs_gt`` types.
             diagonal: ``(dim_a, dim_b)`` to extract the shared-label diagonal.
             raw: Return the response dict instead of pandas.
         """
         body: dict[str, Any] = {"datatype": datatype}
+        # In gene_symbols mode, track values we couldn't translate (sent as-is)
+        # so we can give a clear hint if the server rejects one as an unknown label.
+        untranslated: list[tuple[str, int | str]] = []
         if select:
-            body["select"] = [
-                {"dimension": dim, "value": self._to_id(val)} for dim, val in select.items()
-            ]
+            sel: list[dict[str, Any]] = []
+            for dim, val in select.items():
+                sel.append({"dimension": dim, "value": self._to_id(val)})
+                if self._gene_symbols and self._sym2id is not None and str(val) not in self._sym2id:
+                    untranslated.append((dim, val))
+            body["select"] = sel
         if aggregate:
             body["aggregate"] = aggregate
         if diagonal:
             body["diagonal"] = list(diagonal)
 
-        resp = self._request("POST", f"/datasets/{dataset}/query", json=body)
+        try:
+            resp = self._request("POST", f"/datasets/{dataset}/query", json=body)
+        except QueryError as e:
+            # If the server couldn't find a value we passed through untranslated,
+            # it was likely meant as a gene symbol but isn't one (e.g. a UniProt
+            # accession or a typo). Only values that appear in the server's error
+            # are flagged, so legitimate non-gene labels (timepoints, screen) that
+            # also pass through untranslated aren't mentioned.
+            bad = [f"{dim}={val!r}" for dim, val in untranslated if str(val) in str(e)]
+            if bad:
+                raise QueryError(
+                    f"{e} — {', '.join(bad)} not recognized as a gene symbol, so it was "
+                    f"sent as-is. Look up valid symbols with cm.gene_mappings().",
+                    status_code=e.status_code,
+                ) from e
+            raise
         if raw:
             return resp
 
@@ -175,10 +198,12 @@ class Cheesemonger:
         raw: bool = False,
         **select: int | str,
     ) -> Any:
-        """Aggregate over a dimension (``how`` = ``"mean"`` or ``"count_lt"``).
+        """Aggregate over a dimension.
 
-        Use ``over=<last_dimension>`` (e.g. ``over="screen"``) for cross-screen
-        aggregation.
+        ``how`` is one of ``mean``, ``median``, ``min``, ``max``, ``count``,
+        ``count_lt``, ``count_gt``, ``abs_gt``. ``threshold`` is required for the
+        ``count_lt``/``count_gt``/``abs_gt`` variants. Use ``over=<last_dimension>``
+        (e.g. ``over="screen"``) for cross-screen aggregation.
         """
         spec: dict[str, Any] = {"type": how, "over": over}
         if threshold is not None:

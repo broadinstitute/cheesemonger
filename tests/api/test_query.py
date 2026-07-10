@@ -158,6 +158,109 @@ def test_count_lt(client, settings, db):
     assert body["data"]["ZScore"] == [4, 1, 0]
 
 
+def test_within_block_count_gt(client, settings, db):
+    """count_gt over gene expression -> one count per perturbation."""
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
+    r = _query(client, {
+        "datatype": "ZScore",
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "timepoint", "value": 4},
+        ],
+        "aggregate": {"type": "count_gt", "over": "testedgeneexpression", "threshold": 5},
+    })
+    assert r.status_code == 200, r.text
+    # tp=4 rows [0,1,2,3],[4,5,6,7],[8,9,10,11]; count(>5) -> [0, 2, 4]
+    assert r.json()["data"]["ZScore"] == [0, 2, 4]
+
+
+def test_within_block_abs_gt(client, settings, db):
+    """abs_gt counts large-magnitude values in either direction."""
+    _setup(client, settings, db, {"SW620": _block(BASE - 6, BASE - 6)})
+    r = _query(client, {
+        "datatype": "ZScore",
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "timepoint", "value": 4},
+        ],
+        "aggregate": {"type": "abs_gt", "over": "testedgeneexpression", "threshold": 3},
+    })
+    assert r.status_code == 200, r.text
+    # tp=4 rows [-6,-5,-4,-3],[-2,-1,0,1],[2,3,4,5]; count(|x|>3) -> [3, 0, 2]
+    assert r.json()["data"]["ZScore"] == [3, 0, 2]
+
+
+def test_within_block_min_max_median(client, settings, db):
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
+    sel = [
+        {"dimension": "screen", "value": "SW620"},
+        {"dimension": "timepoint", "value": 4},
+    ]
+    cases = {
+        "min": [0.0, 4.0, 8.0],
+        "max": [3.0, 7.0, 11.0],
+        "median": [1.5, 5.5, 9.5],
+    }
+    for how, expected in cases.items():
+        r = _query(client, {
+            "datatype": "ZScore", "select": sel,
+            "aggregate": {"type": how, "over": "testedgeneexpression"},
+        })
+        assert r.status_code == 200, r.text
+        assert r.json()["data"]["ZScore"] == expected, how
+
+
+def test_within_block_count_excludes_nan(client, settings, db):
+    arr = BASE.copy()
+    arr[0, 0, 0] = np.nan  # tp=4, first perturbation, first gene
+    _setup(client, settings, db, {"SW620": _block(arr, arr)})
+    r = _query(client, {
+        "datatype": "ZScore",
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "timepoint", "value": 4},
+        ],
+        "aggregate": {"type": "count", "over": "testedgeneexpression"},
+    })
+    assert r.status_code == 200, r.text
+    # First perturbation lost one value to NaN; the rest are full (4).
+    assert r.json()["data"]["ZScore"] == [3, 4, 4]
+
+
+def test_cross_block_max(client, settings, db):
+    """max over screen -> element-wise max across blocks."""
+    _setup(client, settings, db, {
+        "SW620": _block(BASE, BASE),
+        "HT29": _block(BASE + 100, BASE + 100),
+    })
+    r = _query(client, {
+        "datatype": "ZScore",
+        "select": [
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+        ],
+        "aggregate": {"type": "max", "over": "screen"},
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["aggregation"] == "max"
+    assert body["data"]["ZScore"] == [100.0, 101.0, 102.0, 103.0]
+
+
+def test_count_gt_requires_threshold(client, settings, db):
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
+    r = _query(client, {
+        "datatype": "ZScore",
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "timepoint", "value": 4},
+        ],
+        "aggregate": {"type": "count_gt", "over": "testedgeneexpression"},
+    })
+    assert r.status_code == 422, r.text
+    assert "threshold" in r.json()["detail"]
+
+
 def test_cross_block_mean(client, settings, db):
     """Omit screen, aggregate over screen -> element-wise mean across blocks."""
     _setup(client, settings, db, {

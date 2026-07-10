@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from cheesemonger.config import Settings, get_settings
 from cheesemonger.crud import dataset as ds_crud
 from cheesemonger.db import get_db
-from cheesemonger.schemas.query import QueryIn, QueryOut
+from cheesemonger.schemas.query import THRESHOLD_AGGREGATIONS, QueryIn, QueryOut
 from cheesemonger.services import dataset as ds_paths
 from cheesemonger.services.query import QueryError, QueryService
 
@@ -85,8 +85,14 @@ def query_data(
                 status_code=400,
                 detail=f"Unknown dimension in aggregate.over: {over}",
             )
-        if query.aggregate.type == "count_lt" and query.aggregate.threshold is None:
-            raise HTTPException(status_code=422, detail="count_lt requires a threshold")
+        if (
+            query.aggregate.type in THRESHOLD_AGGREGATIONS
+            and query.aggregate.threshold is None
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{query.aggregate.type} requires a threshold",
+            )
         selected_dims = {s.dimension for s in query.select}
         if over in selected_dims:
             raise HTTPException(

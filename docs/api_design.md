@@ -128,10 +128,26 @@ class Selection(BaseModel):
     value: int | str                       # coordinate label to fix
 
 class AggregateSpec(BaseModel):
-    type: Literal["mean", "count_lt"]
+    type: Literal["mean", "median", "min", "max",
+                  "count", "count_lt", "count_gt", "abs_gt"]
     over: str                              # dimension to aggregate across
-    threshold: float | None = None         # required for count_lt
+    threshold: float | None = None         # required for count_lt/count_gt/abs_gt
 ```
+
+Aggregation kinds:
+
+| Type | Reduces the `over` axis to | Needs `threshold` |
+|------|----------------------------|-------------------|
+| `mean` | mean (NaN-ignoring) | no |
+| `median` | median (NaN-ignoring) | no |
+| `min` / `max` | min / max (NaN-ignoring) | no |
+| `count` | number of non-NaN values | no |
+| `count_lt` | count of values `< threshold` | **yes** |
+| `count_gt` | count of values `> threshold` | **yes** |
+| `abs_gt` | count of values with `abs(value) > threshold` | **yes** |
+
+All operate the same whether `over` is a within-block dimension or the last
+dimension (cross-block): raw values are gathered first, then reduced once.
 
 A `Selection` fixes a dimension to a single coordinate label, removing it from the result. Omitting a dimension from `select` means "all values along that dimension."
 
@@ -387,9 +403,9 @@ Aggregate object (when not null):
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `type` | string | yes | `"mean"` or `"count_lt"` |
+| `type` | string | yes | One of `mean`, `median`, `min`, `max`, `count`, `count_lt`, `count_gt`, `abs_gt` (see the table above). |
 | `over` | string | yes | Dimension to aggregate across. Can be `"screen"` for cross-block aggregation. |
-| `threshold` | number | for `count_lt` | Threshold value for counting. |
+| `threshold` | number | for `count_lt`/`count_gt`/`abs_gt` | Threshold value for the count. |
 
 ```json
 {

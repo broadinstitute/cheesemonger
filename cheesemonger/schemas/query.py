@@ -11,9 +11,17 @@ class Selection(BaseModel):
     value: int | str
 
 
+# Aggregation kinds. The threshold-based counts need `threshold`; the rest don't.
+AggregationType = Literal[
+    "mean", "median", "min", "max", "count", "count_lt", "count_gt", "abs_gt"
+]
+THRESHOLD_AGGREGATIONS: frozenset[str] = frozenset({"count_lt", "count_gt", "abs_gt"})
+
+
 class AggregateSpec(BaseModel):
-    type: Literal["mean", "count_lt"]
+    type: AggregationType
     over: str
+    # Required for count_lt / count_gt / abs_gt; ignored by the others.
     threshold: float | None = None
 
 
