@@ -27,7 +27,7 @@ import xarray as xr
 from sqlalchemy.orm import Session
 
 from cheesemonger.crud import dataset as ds_crud
-from cheesemonger.schemas.common import DatatypeSpec, Dimension
+from cheesemonger.schemas.common import ChunkDim, DatatypeSpec, Dimension
 from cheesemonger.schemas.dataset import DatasetIn
 from cheesemonger.services import dataset as ds_paths
 
@@ -50,8 +50,17 @@ def _coord_labels(src: xr.Dataset, dim: str) -> list:
     return [v if isinstance(v, int) and not isinstance(v, bool) else str(v) for v in values]
 
 
-def _infer_schema(src: xr.Dataset, name: str, last_dimension: str) -> DatasetIn:
-    """Build a DatasetIn schema from a source store's dims and data variables."""
+def _infer_schema(
+    src: xr.Dataset,
+    name: str,
+    last_dimension: str,
+    chunk_shape: dict[str, int] | None = None,
+) -> DatasetIn:
+    """Build a DatasetIn schema from a source store's dims and data variables.
+
+    ``chunk_shape`` (dim -> chunk size) is recorded so every block of the dataset
+    is chunked the same way. Entries for dims not in the source are dropped.
+    """
     if last_dimension in src.sizes:
         raise LoaderError(
             f"last_dimension {last_dimension!r} must not be one of the source "
@@ -67,13 +76,17 @@ def _infer_schema(src: xr.Dataset, name: str, last_dimension: str) -> DatasetIn:
         )
         for v in src.data_vars
     ]
+    src_dims = {str(d) for d in src.sizes}
+    chunks = [
+        ChunkDim(name=n, size=s) for n, s in (chunk_shape or {}).items() if n in src_dims
+    ]
     try:
         return DatasetIn(
             name=name,
             last_dimension=last_dimension,
             dimensions=dimensions,
             datatypes=datatypes,
-            chunk_shape=[],
+            chunk_shape=chunks,
         )
     except Exception as e:
         raise LoaderError(f"Inferred schema is invalid: {e}") from e
@@ -103,27 +116,56 @@ def _validate_against_schema(
             )
 
 
-def _write_dataset(ds: xr.Dataset, dest: str) -> None:
-    """Rechunk to sane chunk sizes and write to a Zarr store, with progress.
+# Default per-chunk target when no chunk_shape is declared. Far below dask's
+# ~128 MiB default so a point query never pulls a huge band (read amplification).
+_DEFAULT_CHUNK_TARGET = "8MiB"
 
-    TODO(rechunk): honor the dataset's declared chunk_shape instead of "auto".
+
+def _rechunk(ds: xr.Dataset, chunk_shape: dict[str, int] | None) -> xr.Dataset:
+    """Apply the dataset's chunking before writing.
+
+    With ``chunk_shape`` (dim -> size), each listed dim gets that chunk size and
+    every other dim is kept as a single chunk (full extent). This is what makes a
+    query-aligned layout possible: e.g. ``{"Target": 1}`` (with Response left
+    whole) makes each (Target, all-Response) series exactly one chunk, so a series
+    read touches one small object instead of a 100+ MB band. With no chunk_shape,
+    fall back to a modest ~8 MiB auto target.
     """
+    if chunk_shape:
+        unknown = set(chunk_shape) - {str(d) for d in ds.sizes}
+        if unknown:
+            logger.warning("Ignoring chunk_shape dims not in the source: %s", sorted(unknown))
+        # Listed dims -> given size; all others -> one chunk (full extent).
+        return ds.chunk({str(d): chunk_shape.get(str(d), -1) for d in ds.sizes})
+
+    import dask.config
+
+    with dask.config.set({"array.chunk-size": _DEFAULT_CHUNK_TARGET}):
+        return ds.chunk("auto")
+
+
+def _write_dataset(
+    ds: xr.Dataset, dest: str, chunk_shape: dict[str, int] | None = None
+) -> None:
+    """Rechunk (see _rechunk) and write to a Zarr store, with progress."""
     for var in ds.variables.values():
         for key in ("chunks", "preferred_chunks"):
             var.encoding.pop(key, None)
+
+    rechunked = _rechunk(ds, chunk_shape)
 
     try:
         from dask.diagnostics import ProgressBar  # type: ignore[attr-defined]
     except ImportError:
         logger.info("Writing (no dask; progress bar unavailable)...")
-        ds.to_zarr(dest, mode="w")
+        rechunked.to_zarr(dest, mode="w")
         return
 
     # dt=1.0 so the bar updates every second — enough to see it's alive on a
     # slow remote read without spamming the terminal. The bar covers the whole
     # read+write compute (reading source chunks, writing them to dest).
     with ProgressBar(dt=1.0):
-        ds.chunk("auto").to_zarr(dest, mode="w")
+        rechunked.to_zarr(dest, mode="w")
 
 
 def load_block(
@@ -136,6 +178,7 @@ def load_block(
     last_dimension: str = "screen",
     create_dataset: bool = False,
     overwrite: bool = False,
+    chunk_shape: dict[str, int] | None = None,
 ) -> dict:
     """Load a Zarr store as a block of ``dataset``.
 
@@ -149,6 +192,10 @@ def load_block(
         last_dimension: Name of the block key (only used when creating).
         create_dataset: If the dataset doesn't exist, infer and create it.
         overwrite: Replace the block if it already exists.
+        chunk_shape: Dim -> chunk size, applied when *creating* the dataset and
+            stored on it. Unlisted dims stay whole. For an existing dataset the
+            stored chunk_shape is reused (this arg is ignored) so all blocks
+            chunk consistently.
 
     Returns:
         A summary dict (dataset, block, path, dimensions, datatypes).
@@ -170,9 +217,12 @@ def load_block(
         existing_schema = ds_crud.get_schema_dict(db, dataset)
         if existing_schema is not None:
             _validate_against_schema(src, existing_schema, dataset, last_dimension)
+            # Reuse the dataset's stored chunking so all blocks match.
+            resolved_chunks = {c["name"]: c["size"] for c in existing_schema["chunk_shape"]}
         elif create_dataset:
-            dataset_in = _infer_schema(src, dataset, last_dimension)
+            dataset_in = _infer_schema(src, dataset, last_dimension, chunk_shape=chunk_shape)
             ds_crud.create_dataset(db, dataset_in)
+            resolved_chunks = {c.name: c.size for c in dataset_in.chunk_shape}
             logger.info(
                 "Created dataset %r (last_dimension=%r, %d dims, %d datatypes)",
                 dataset, last_dimension, len(dataset_in.dimensions), len(dataset_in.datatypes),
@@ -207,7 +257,7 @@ def load_block(
             "Writing block %r -> %s  (remote gs:// sources can take a while)",
             block, dest,
         )
-        _write_dataset(src, str(dest))
+        _write_dataset(src, str(dest), resolved_chunks)
 
         # Register the block in the DB
         if not ds_crud.block_exists(db, dataset, block):

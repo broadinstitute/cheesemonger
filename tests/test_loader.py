@@ -166,6 +166,36 @@ def test_unbroadcasted_store_loads_and_queries(tmp_path, loader_db):
     assert out.data["CtrlMean"] == pytest.approx([1.0, 2.0, 3.0, 4.0])
 
 
+def test_chunk_shape_is_honored_and_reused(tmp_path, loader_db):
+    """--chunk sizes are applied to the Zarr, stored on the dataset, and reused
+    by later blocks. Unlisted dims stay whole (one chunk)."""
+    source = _source_store(tmp_path)  # dims (Timepoint=2, Target=2, Response=4)
+    data_dir = str(tmp_path / "data")
+
+    load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db, create_dataset=True,
+               chunk_shape={"Target": 1})
+
+    b1 = xr.open_zarr(str(Path(data_dir) / "ds1" / "blocks" / "PS-SC-1"))
+    try:
+        # ZScore dims (Timepoint, Target, Response) -> Target chunked to 1,
+        # Timepoint and Response left whole.
+        assert b1["ZScore"].encoding["chunks"] == (2, 1, 4)
+    finally:
+        b1.close()
+
+    # Stored on the dataset.
+    schema = ds_crud.get_schema_dict(loader_db, "ds1")
+    assert schema["chunk_shape"] == [{"name": "Target", "size": 1}]
+
+    # A second block reuses the stored chunking without repeating --chunk.
+    load_block(source, "ds1", "PS-SC-2", data_dir, db=loader_db)
+    b2 = xr.open_zarr(str(Path(data_dir) / "ds1" / "blocks" / "PS-SC-2"))
+    try:
+        assert b2["ZScore"].encoding["chunks"] == (2, 1, 4)
+    finally:
+        b2.close()
+
+
 def test_load_missing_dataset_without_create_errors(tmp_path, loader_db):
     source = _source_store(tmp_path)
     data_dir = str(tmp_path / "data")

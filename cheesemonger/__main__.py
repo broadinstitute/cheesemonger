@@ -29,6 +29,22 @@ def _ensure_tables(settings) -> None:
     Base.metadata.create_all(bind=get_engine(settings.sqlalchemy_database_url))
 
 
+def _parse_chunks(items: list[str]) -> dict[str, int]:
+    """Parse repeated ``--chunk DIM=SIZE`` flags into a {dim: size} dict."""
+    chunks: dict[str, int] = {}
+    for item in items:
+        name, sep, size = item.partition("=")
+        if not sep or not name:
+            print(f"ERROR: --chunk expects DIM=SIZE, got {item!r}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            chunks[name] = int(size)
+        except ValueError:
+            print(f"ERROR: chunk size must be an integer, got {item!r}", file=sys.stderr)
+            sys.exit(1)
+    return chunks
+
+
 def _cmd_load(args: argparse.Namespace) -> None:
     settings = get_settings()
     data_dir = args.data_dir or settings.data_dir
@@ -43,6 +59,7 @@ def _cmd_load(args: argparse.Namespace) -> None:
             last_dimension=args.last_dimension,
             create_dataset=args.create_dataset,
             overwrite=args.overwrite,
+            chunk_shape=_parse_chunks(args.chunk) or None,
         )
     except LoaderError as e:
         print(f"ERROR: {e}", file=sys.stderr)
@@ -115,6 +132,12 @@ def main() -> None:
     load_parser.add_argument(
         "--overwrite", action="store_true",
         help="Replace the block if it already exists",
+    )
+    load_parser.add_argument(
+        "--chunk", action="append", default=[], metavar="DIM=SIZE",
+        help="Chunk a dimension to SIZE (repeatable); unlisted dims stay whole. "
+             "Set when creating the dataset. E.g. for series-heavy access: "
+             "--chunk Target=1 --chunk Timepoint=1 (leaves Response whole).",
     )
     load_parser.set_defaults(func=_cmd_load)
 
