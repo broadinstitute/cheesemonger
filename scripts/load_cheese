@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#
+# load_cheese — thin wrapper around the cheesemonger admin CLI running inside the
+# deployed Docker container, so you can type short commands instead of the full
+# `docker exec ... python -m cheesemonger ...` incantation.
+#
+# It forwards every argument straight through, so it covers all subcommands:
+#
+#   load_cheese load --source gs://.../PS-SC-1_degs.zarr \
+#       --dataset degs --block PS-SC-1 --create-dataset --chunk Target=1 --chunk Timepoint=1
+#   load_cheese load --source gs://.../PS-SC-2_degs.zarr --dataset degs --block PS-SC-2
+#   load_cheese delete-block   --dataset degs --block PS-SC-1
+#   load_cheese delete-dataset --dataset degs --force
+#   load_cheese status
+#   load_cheese status --dataset degs
+#   load_cheese load --help          # full flag reference for any subcommand
+#
+# Env:
+#   CHEESE_CONTAINER   Docker container name (default: cheesemonger)
+#
+# Install (on the deployment host):
+#   sudo install -m 0755 load_cheese /usr/local/bin/load_cheese
+set -euo pipefail
+
+CONTAINER="${CHEESE_CONTAINER:-cheesemonger}"
+
+if [ "$#" -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    cat >&2 <<'USAGE'
+load_cheese — cheesemonger admin CLI wrapper (runs inside the Docker container)
+
+Usage:
+  load_cheese load          --source <gs://...|path> --dataset <name> --block <name>
+                            [--create-dataset] [--overwrite]
+                            [--last-dimension screen] [--chunk DIM=SIZE ...]
+  load_cheese delete-block  --dataset <name> --block <name>
+  load_cheese delete-dataset --dataset <name> [--force]
+  load_cheese status        [--dataset <name>]
+
+  load_cheese <subcommand> --help   # detailed flags
+
+Env: CHEESE_CONTAINER (default: cheesemonger)
+USAGE
+    exit 1
+fi
+
+# Allocate a TTY only when attached to one, so the load progress bar renders
+# interactively but the script still works from cron / non-interactive shells.
+tty_flag=()
+if [ -t 1 ]; then
+    tty_flag=(-t)
+fi
+
+# PYTHONUNBUFFERED so log lines and the progress bar stream out live.
+exec docker exec "${tty_flag[@]}" -e PYTHONUNBUFFERED=1 "$CONTAINER" \
+    python -m cheesemonger "$@"

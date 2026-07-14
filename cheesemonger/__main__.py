@@ -5,6 +5,7 @@ Usage:
         --dataset perturb-scuba --block PS-SC-1 --create-dataset
     python -m cheesemonger delete-block --dataset perturb-scuba --block PS-SC-1
     python -m cheesemonger delete-dataset --dataset perturb-scuba --force
+    python -m cheesemonger status
 
 All data mutations (create/load/delete of datasets and blocks) happen here, not
 over HTTP — the REST API is read-only. Source data is written by
@@ -104,6 +105,43 @@ def _cmd_delete_dataset(args: argparse.Namespace) -> None:
     )
 
 
+def _cmd_status(args: argparse.Namespace) -> None:
+    settings = get_settings()
+    _ensure_tables(settings)
+
+    from .crud import dataset as ds_crud
+    from .db import SessionLocal
+
+    db = SessionLocal(settings.sqlalchemy_database_url)
+    try:
+        if args.dataset:
+            ds = ds_crud.get_dataset_by_name(db, args.dataset)
+            if ds is None:
+                print(f"Dataset {args.dataset!r} not found.", file=sys.stderr)
+                sys.exit(1)
+            datasets = [ds]
+        else:
+            datasets = ds_crud.list_datasets(db)
+
+        if not datasets:
+            print("No datasets loaded.")
+            return
+
+        total_blocks = sum(len(ds.blocks) for ds in datasets)
+        print(f"{len(datasets)} dataset(s), {total_blocks} block(s) total:\n")
+        for ds in datasets:
+            blocks = sorted(b.name for b in ds.blocks)
+            dims = ", ".join(f"{d['name']}({len(d['labels'])})" for d in ds.dimensions)
+            print(f"• {ds.name}")
+            print(f"    last_dimension: {ds.last_dimension}")
+            print(f"    dimensions:     {dims}")
+            print(f"    datatypes:      {len(ds.datatypes)}")
+            print(f"    blocks ({len(blocks)}): {', '.join(blocks) or '(none)'}")
+            print()
+    finally:
+        db.close()
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -165,6 +203,14 @@ def main() -> None:
         help="Delete the dataset's blocks first (otherwise refuse if any remain)",
     )
     del_ds_parser.set_defaults(func=_cmd_delete_dataset)
+
+    status_parser = subparsers.add_parser(
+        "status", help="Show loaded datasets, their blocks, dimensions, and datatypes"
+    )
+    status_parser.add_argument(
+        "--dataset", default=None, help="Show only this dataset (default: all)"
+    )
+    status_parser.set_defaults(func=_cmd_status)
 
     args = parser.parse_args()
     if not hasattr(args, "func"):

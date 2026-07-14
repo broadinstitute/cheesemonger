@@ -196,6 +196,31 @@ def test_chunk_shape_is_honored_and_reused(tmp_path, loader_db):
         b2.close()
 
 
+def test_status_command_lists_datasets(tmp_path, loader_db, capsys, monkeypatch):
+    import argparse
+
+    import cheesemonger.config as cfg
+    from cheesemonger.__main__ import _cmd_status
+    from cheesemonger.config import Settings
+
+    source = _source_store(tmp_path)
+    data_dir = str(tmp_path / "data")
+    load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db, create_dataset=True)
+
+    url = f"sqlite:///{tmp_path / 'loader_test.db'}"  # same file loader_db uses
+    monkeypatch.setattr(
+        cfg, "_get_settings",
+        lambda: Settings(
+            sqlalchemy_database_url=url, data_dir=data_dir, taiga_gene_mapping_id=""
+        ),
+    )
+    _cmd_status(argparse.Namespace(dataset=None))
+    out = capsys.readouterr().out
+    assert "1 dataset(s)" in out
+    assert "ds1" in out
+    assert "PS-SC-1" in out
+
+
 def test_load_missing_dataset_without_create_errors(tmp_path, loader_db):
     source = _source_store(tmp_path)
     data_dir = str(tmp_path / "data")
