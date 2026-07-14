@@ -121,6 +121,7 @@ deleted exclusively through the CLI loader (see [Loading & retrieving data](#loa
 | `GET`    | `/health`                            | Service health check                    |
 | `GET`    | `/datasets`                          | List all datasets                       |
 | `GET`    | `/datasets/{dataset}`                | Get dataset metadata                    |
+| `GET`    | `/datasets/{dataset}/dimensions/{dim}` | Full coordinate labels for one dimension |
 | `GET`    | `/gene_mappings`                     | Retrieve gene mapping (entrez ↔ symbol) |
 | `POST`   | `/datasets/{dataset}/query`          | Query data                              |
 

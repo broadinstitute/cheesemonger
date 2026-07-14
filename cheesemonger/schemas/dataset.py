@@ -48,6 +48,12 @@ class DimensionInfo(BaseModel):
     labels_sample: list[int] | list[str] | None = None
 
 
+class DimensionLabelsOut(BaseModel):
+    name: str
+    size: int  # total number of labels (before any offset/limit paging)
+    labels: list[int] | list[str]
+
+
 class DatasetDetail(BaseModel):
     name: str
     last_dimension: str

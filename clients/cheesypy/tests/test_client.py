@@ -192,6 +192,37 @@ def test_known_symbol_is_translated_before_send():
     assert {"dimension": "Target", "value": "23293"} in captured["body"]["select"]
 
 
+def test_dimension_labels_plain():
+    captured = {}
+
+    def handler(request):
+        captured["path"] = request.url.path
+        captured["query"] = dict(request.url.params)
+        return httpx.Response(200, json={
+            "name": "Timepoint", "size": 2, "labels": ["D4", "D7"],
+        })
+
+    cm = make_client(handler)
+    out = cm.dimension_labels("perturb-scuba", "Timepoint")
+    assert captured["path"] == "/datasets/perturb-scuba/dimensions/Timepoint"
+    assert out == ["D4", "D7"]
+
+
+def test_dimension_labels_translates_to_symbols():
+    def handler(request):
+        if request.url.path == "/gene_mappings":
+            return httpx.Response(200, json={
+                "name": "gene_mappings", "taiga_id": "x", "entries_count": 2,
+                "entries": {"23293": "SMG6", "55149": "MTPAP"},
+            })
+        return httpx.Response(200, json={
+            "name": "Target", "size": 2, "labels": ["23293", "55149"],
+        })
+
+    cm = make_client(handler, gene_symbols=True)
+    assert cm.dimension_labels("perturb-scuba", "Target") == ["SMG6", "MTPAP"]
+
+
 def test_list_datasets_returns_dataframe():
     def handler(request):
         return httpx.Response(200, json={"datasets": [

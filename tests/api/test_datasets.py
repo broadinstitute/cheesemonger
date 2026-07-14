@@ -68,6 +68,47 @@ def test_get_missing_dataset(client):
     assert response.status_code == 404
 
 
+# --- Dimension labels ------------------------------------------------------
+
+
+def test_dimension_labels_full(client, db):
+    _seed(db)
+    r = client.get("/datasets/pesca/dimensions/testedgeneexpression")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "testedgeneexpression"
+    assert body["size"] == 4
+    assert body["labels"] == ["103", "226", "672", "7157"]  # full, not truncated
+
+
+def test_dimension_labels_paging(client, db):
+    _seed(db)
+    body = client.get(
+        "/datasets/pesca/dimensions/testedgeneexpression?offset=1&limit=2"
+    ).json()
+    assert body["size"] == 4  # total, before paging
+    assert body["labels"] == ["226", "672"]
+
+
+def test_dimension_labels_last_dimension_lists_blocks(client, db):
+    _seed(db)
+    ds_crud.create_block(db, "pesca", "SW620")
+    ds_crud.create_block(db, "pesca", "HT29")
+    db.commit()
+    r = client.get("/datasets/pesca/dimensions/screen")
+    assert r.status_code == 200
+    assert r.json()["labels"] == ["HT29", "SW620"]  # sorted block names
+
+
+def test_dimension_labels_unknown_dim_404(client, db):
+    _seed(db)
+    assert client.get("/datasets/pesca/dimensions/nope").status_code == 404
+
+
+def test_dimension_labels_missing_dataset_404(client):
+    assert client.get("/datasets/nope/dimensions/timepoint").status_code == 404
+
+
 # --- Mutations are not exposed over HTTP -----------------------------------
 
 

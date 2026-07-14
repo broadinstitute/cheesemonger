@@ -81,8 +81,32 @@ class Cheesemonger:
         return pd.DataFrame(self._request("GET", "/datasets")["datasets"])
 
     def metadata(self, dataset: str) -> dict:
-        """Full metadata for a dataset (dimensions, labels, blocks, datatypes)."""
+        """Full metadata for a dataset (dimensions, labels, blocks, datatypes).
+
+        Note: large dimensions (>100 labels) are truncated to a sample here; use
+        ``dimension_labels()`` to get the full list of one dimension.
+        """
         return self._request("GET", f"/datasets/{dataset}")
+
+    def dimension_labels(
+        self, dataset: str, dim: str, *, offset: int = 0, limit: int | None = None
+    ) -> list:
+        """All coordinate labels for one dimension (e.g. every timepoint / target /
+        response), not truncated. Pass the block-key name (e.g. ``"screen"``) to
+        list the loaded blocks. With ``gene_symbols=True``, gene labels are
+        translated to symbols; non-gene labels (timepoints, screens) pass through.
+        """
+        params: dict[str, Any] = {"offset": offset}
+        if limit is not None:
+            params["limit"] = limit
+        labels = self._request("GET", f"/datasets/{dataset}/dimensions/{dim}", params=params)[
+            "labels"
+        ]
+        if self._gene_symbols:
+            self._ensure_maps()
+            assert self._id2sym is not None
+            labels = [self._id2sym.get(str(x), x) for x in labels]
+        return labels
 
     def gene_mappings(self) -> dict:
         """Raw entrez<->symbol mapping payload from the server."""
