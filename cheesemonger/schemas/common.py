@@ -45,6 +45,17 @@ def sanitize_name(value: str) -> str:
     return value
 
 
+def normalize_name(value: str) -> str:
+    """Make a name storable by replacing ``.`` with ``-``.
+
+    Screen IDs like ``PS-SC-000651.GG01`` carry a dot, which ``sanitize_name``
+    rejects (dots enable path traversal). Callers normalize the dot to a hyphen
+    before the name is used, so users can paste the real screen ID. Only dots are
+    transformed — any other invalid character still fails ``sanitize_name``.
+    """
+    return value.replace(".", "-")
+
+
 # Annotated str that runs sanitize_name during Pydantic validation.
 SafeName = Annotated[str, AfterValidator(sanitize_name)]
 

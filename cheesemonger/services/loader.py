@@ -27,7 +27,7 @@ import xarray as xr
 from sqlalchemy.orm import Session
 
 from cheesemonger.crud import dataset as ds_crud
-from cheesemonger.schemas.common import ChunkDim, DatatypeSpec, Dimension
+from cheesemonger.schemas.common import ChunkDim, DatatypeSpec, Dimension, normalize_name
 from cheesemonger.schemas.dataset import DatasetIn
 from cheesemonger.services import dataset as ds_paths
 
@@ -168,6 +168,15 @@ def _write_dataset(
         rechunked.to_zarr(dest, mode="w")
 
 
+def _normalized_block(block: str) -> str:
+    """Replace '.' with '-' in a block name (screen IDs like 'PS-SC-…​.GG01'),
+    warning if it changed, so the caller can paste the raw screen ID."""
+    normalized = normalize_name(block)
+    if normalized != block:
+        logger.warning("Normalized block name %r -> %r (dots are not allowed).", block, normalized)
+    return normalized
+
+
 def load_block(
     source: str,
     dataset: str,
@@ -200,6 +209,8 @@ def load_block(
     Returns:
         A summary dict (dataset, block, path, dimensions, datatypes).
     """
+    block = _normalized_block(block)
+
     owns_session = False
     if db is None:
         from cheesemonger.config import get_settings
@@ -301,6 +312,7 @@ def delete_block(
     Raises LoaderError if the dataset or block does not exist. Mirrors the
     session handling of load_block (a temporary session is opened for CLI use).
     """
+    block = _normalized_block(block)
     db, owns_session = _open_session(db)
     try:
         if not ds_crud.dataset_exists(db, dataset):

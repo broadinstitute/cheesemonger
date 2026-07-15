@@ -221,6 +221,24 @@ def test_status_command_lists_datasets(tmp_path, loader_db, capsys, monkeypatch)
     assert "PS-SC-1" in out
 
 
+def test_block_name_dot_is_normalized(tmp_path, loader_db):
+    """A screen ID with a dot (PS-SC-000651.GG01) is stored with the dot
+    replaced by a hyphen, and delete accepts the raw dotted name too."""
+    source = _source_store(tmp_path)
+    data_dir = str(tmp_path / "data")
+
+    summary = load_block(
+        source, "ds1", "PS-SC-000651.GG01", data_dir, db=loader_db, create_dataset=True
+    )
+    assert summary["block"] == "PS-SC-000651-GG01"
+    assert ds_crud.list_block_names(loader_db, "ds1") == ["PS-SC-000651-GG01"]
+    assert (Path(data_dir) / "ds1" / "blocks" / "PS-SC-000651-GG01").exists()
+
+    # Deleting with the raw dotted ID resolves to the normalized block.
+    delete_block("ds1", "PS-SC-000651.GG01", data_dir, db=loader_db)
+    assert ds_crud.list_block_names(loader_db, "ds1") == []
+
+
 def test_load_missing_dataset_without_create_errors(tmp_path, loader_db):
     source = _source_store(tmp_path)
     data_dir = str(tmp_path / "data")
