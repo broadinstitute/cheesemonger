@@ -8,6 +8,7 @@ you can go from a query to a plot in one line. Depends only on `httpx` and
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Concepts](#concepts)
+- [Discovering labels](#discovering-labels)
 - [Reading data](#reading-data)
 - [Return types](#return-types)
 - [Gene symbols](#gene-symbols)
@@ -85,6 +86,33 @@ left free. Fix all but one → a vector (`Series`); fix all → a scalar.
 
 `cm.metadata("perturb-scuba")` shows you the available dimensions, their labels,
 the loaded blocks, and the datatypes.
+
+## Discovering labels
+
+Before you can fix a dimension in a query you need to know its valid labels.
+`metadata()` gives an overview, but it **truncates** any dimension with more than
+100 labels to a small sample (so pulling a dataset's metadata stays cheap). To
+get the *complete*, untruncated list of one dimension, use `dimension_labels()`:
+
+```python
+cm.dimension_labels("degs-dmc3", "Target")      # every perturbed gene
+cm.dimension_labels("degs-dmc3", "Timepoint")   # every timepoint
+cm.dimension_labels("degs-dmc3", "screen")      # the loaded blocks (block key)
+```
+
+It returns a plain `list`. Large dimensions can be paged:
+
+```python
+cm.dimension_labels("degs-dmc3", "Target", offset=0, limit=1000)   # first 1000
+```
+
+With `gene_symbols=True`, gene labels come back as symbols; non-gene labels
+(timepoints, screens) pass through unchanged:
+
+```python
+cm = Cheesemonger("https://cheesemonger.internal", gene_symbols=True)
+cm.dimension_labels("degs-dmc3", "Target")      # -> ['TP53', 'MDM2', ...]
+```
 
 ## Reading data
 
