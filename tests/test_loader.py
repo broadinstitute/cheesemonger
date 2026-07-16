@@ -239,6 +239,37 @@ def test_block_name_dot_is_normalized(tmp_path, loader_db):
     assert ds_crud.list_block_names(loader_db, "ds1") == []
 
 
+def test_default_chunking_handles_object_dtype(tmp_path, loader_db):
+    """Default (auto) chunking must not crash on object/string variables like
+    the correlates store's CorrelateTarget — dask can't byte-size those."""
+    dims = ["Timepoint", "Target", "Rank"]
+    coords = {"Timepoint": TP, "Target": ["1", "2"], "Rank": [1, 2, 3]}
+    ds = xr.Dataset(
+        {
+            "Correlation": xr.DataArray(
+                np.random.default_rng(0).random((2, 2, 3)).astype("float32"),
+                dims=dims, coords=coords,
+            ),
+            "CorrelateTarget": xr.DataArray(
+                np.full((2, 2, 3), "g", dtype=object), dims=dims, coords=coords
+            ),
+        }
+    )
+    src = tmp_path / "src" / "corr.zarr"
+    ds.to_zarr(src, mode="w")
+    data_dir = str(tmp_path / "data")
+
+    # No chunk_shape -> the default auto path; must succeed despite the object var.
+    summary = load_block(str(src), "corr", "S1", data_dir, db=loader_db, create_dataset=True)
+    assert set(summary["datatypes"]) == {"Correlation", "CorrelateTarget"}
+
+    written = xr.open_zarr(str(Path(data_dir) / "corr" / "blocks" / "S1"))
+    try:
+        assert str(written["CorrelateTarget"].values[0, 0, 0]) == "g"
+    finally:
+        written.close()
+
+
 def test_load_missing_dataset_without_create_errors(tmp_path, loader_db):
     source = _source_store(tmp_path)
     data_dir = str(tmp_path / "data")

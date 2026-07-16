@@ -182,7 +182,7 @@ uv run python -m cheesemonger load \
 | `--source` | Local path or `gs://` URL of the source Zarr store |
 | `--dataset` / `--block` | Target dataset and block (e.g. screen ID) names |
 | `--create-dataset` | Infer + create the dataset schema if it doesn't exist |
-| `--last-dimension` | Block-key name when creating (default: `screen`) |
+| `--last-dimension` | Block-key name when creating (default: `Screen`) |
 | `--overwrite` | Replace the block if it already exists |
 | `--data-dir` | Store root (defaults to `DATA_DIR` from settings/`.env`) |
 

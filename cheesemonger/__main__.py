@@ -160,8 +160,8 @@ def main() -> None:
         help="Data root to load into (default: DATA_DIR from settings/.env)",
     )
     load_parser.add_argument(
-        "--last-dimension", default="screen",
-        help="Name of the block key when creating the dataset (default: screen)",
+        "--last-dimension", default="Screen",
+        help="Name of the block key when creating the dataset (default: Screen)",
     )
     load_parser.add_argument(
         "--create-dataset", action="store_true",

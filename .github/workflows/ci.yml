@@ -70,3 +70,56 @@ jobs:
 
       - name: Tests (pytest)
         run: uv run pytest -q
+
+  # Guard: if the shipped cheesypy package code changes, the version in
+  # pyproject.toml must change too — so a release can't be silently forgotten
+  # (publishing is tag-triggered; see .github/workflows/publish-cheesypy.yml).
+  cheesypy-version-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so we can diff against the base
+
+      - name: Require a version bump when cheesypy code changes
+        env:
+          # PR: the branch being merged into. Push: the commit before this push.
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          PKG="clients/cheesypy/cheesypy"          # the shipped Python package
+          PYPROJECT="clients/cheesypy/pyproject.toml"
+
+          base="${BASE_SHA:-}"
+          # New branch / initial push report an all-zero or empty base — fall
+          # back to origin/main so we still have something to diff against.
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            git fetch origin main --depth=1 >/dev/null 2>&1 || true
+            base="$(git rev-parse origin/main 2>/dev/null || true)"
+          fi
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "No usable base commit to diff against; skipping guard."
+            exit 0
+          fi
+
+          changed="$(git diff --name-only "$base" HEAD -- "$PKG" || true)"
+          if [ -z "$changed" ]; then
+            echo "No changes under $PKG/ — version bump not required."
+            exit 0
+          fi
+          echo "Changed package files:"; echo "$changed"
+
+          read_version() { git show "$1:$PYPROJECT" 2>/dev/null \
+            | sed -n 's/^version *= *"\(.*\)"/\1/p' | head -1; }
+          base_ver="$(read_version "$base")"
+          head_ver="$(read_version HEAD)"
+          echo "version: base=${base_ver:-<none>} head=${head_ver:-<none>}"
+
+          if [ -z "$head_ver" ]; then
+            echo "::error::Could not read version from $PYPROJECT"; exit 1
+          fi
+          if [ "$base_ver" = "$head_ver" ]; then
+            echo "::error file=$PYPROJECT::cheesypy package code changed but version is still $head_ver. Bump 'version' in $PYPROJECT, then push a cheesypy-v$head_ver tag (matching the new version) to publish."
+            exit 1
+          fi
+          echo "Version bumped ${base_ver} -> ${head_ver}. OK."

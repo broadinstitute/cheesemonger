@@ -140,8 +140,13 @@ def _rechunk(ds: xr.Dataset, chunk_shape: dict[str, int] | None) -> xr.Dataset:
 
     import dask.config
 
+    # dask "auto" can't estimate the byte size of object-dtype (e.g. string)
+    # arrays — as in the correlates store's CorrelateTarget — so chunk those
+    # whole and auto-size only the numeric variables.
     with dask.config.set({"array.chunk-size": _DEFAULT_CHUNK_TARGET}):
-        return ds.chunk("auto")
+        for name in list(ds.data_vars):
+            ds[name] = ds[name].chunk(-1 if ds[name].dtype.kind == "O" else "auto")
+    return ds
 
 
 def _write_dataset(
@@ -184,7 +189,7 @@ def load_block(
     data_dir: str,
     *,
     db: Session | None = None,
-    last_dimension: str = "screen",
+    last_dimension: str = "Screen",
     create_dataset: bool = False,
     overwrite: bool = False,
     chunk_shape: dict[str, int] | None = None,
