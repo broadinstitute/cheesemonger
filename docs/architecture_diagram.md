@@ -79,7 +79,7 @@ graph TB
 | Component | Role |
 |-----------|------|
 | **FastAPI Server** | Serves REST API, validates requests via Pydantic, reads blocks via `xr.open_zarr()` |
-| **ThreadPool (4 workers)** | Parallelizes multi-block and multi-datatype reads within a single request |
+| **ThreadPool (4 workers)** | Parallelizes multi-block reads within a single request |
 | **Gene Mapping Cache** | In-memory entrez ↔ symbol mapping, loaded from Taiga at startup |
 | **Hyperdisk** | High-performance block storage mounted at `/mnt/data/`. Stores all Zarr data. |
 | **Block (xarray Dataset as Zarr)** | One folder per screen. Contains an xarray Dataset with data variables (datatypes) and coordinate arrays (dimension labels). Written by `xarray.Dataset.to_zarr()`. |
