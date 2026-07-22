@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from cheesemonger.models.dataset import DatatypeDict, SchemaDict
 from cheesemonger.schemas.query import (
     AggregateSpec,
     IndexLevel,
@@ -192,7 +193,7 @@ class QueryService:
     def execute(
         self,
         query: QueryIn,
-        schema: dict,
+        schema: SchemaDict,
         block_names: list[str],
         get_block_path: Callable[[str], Path],
     ) -> QueryOut:
@@ -212,8 +213,6 @@ class QueryService:
         if not target_blocks:
             return QueryOut(blocks=[], shape=[], index=[], data={})
 
-        datatypes = query.datatype if isinstance(query.datatype, list) else [query.datatype]
-
         agg_over_last_dim = (
             query.aggregate is not None and query.aggregate.over == last_dim
         )
@@ -221,26 +220,23 @@ class QueryService:
             query.aggregate is not None and not agg_over_last_dim
         )
 
-        # Read all blocks in parallel. Each _read_block call reads all
-        # requested datatypes for one block; blocks are dispatched to
-        # the thread pool for parallel I/O.
-        all_results: dict[str, dict[str, np.ndarray]] = {}
+        # Read all blocks in parallel. Each _read_block call reads the queried
+        # datatype for one block. Blocks are dispatched to the thread pool for
+        # parallel I/O.
+        all_results: dict[str, np.ndarray] = {}
 
-        def _read_block(block_name: str) -> tuple[str, dict[str, np.ndarray]]:
+        def _read_block(block_name: str) -> tuple[str, np.ndarray]:
             block_path = get_block_path(block_name)
             ds = xr.open_zarr(str(block_path))
             try:
-                results = {}
-                for dt in datatypes:
-                    arr = _read_datatype_from_ds(
-                        ds, dt, array_selections,
-                        query.aggregate if within_block_agg else None,
-                        query.diagonal,
-                    )
-                    results[dt] = arr
+                arr = _read_datatype_from_ds(
+                    ds, query.datatype, array_selections,
+                    query.aggregate if within_block_agg else None,
+                    query.diagonal,
+                )
             finally:
                 ds.close()
-            return block_name, results
+            return block_name, arr
 
         if len(target_blocks) == 1:
             name, res = _read_block(target_blocks[0])
@@ -252,61 +248,55 @@ class QueryService:
                 all_results[name] = res
 
         # Determine the queried datatype's spec for building the index
-        first_dt_spec = None
+        dt_spec = None
         for dt in schema["datatypes"]:
-            if dt["name"] == datatypes[0]:
-                first_dt_spec = dt
+            if dt["name"] == query.datatype:
+                dt_spec = dt
                 break
 
         if agg_over_last_dim:
             assert query.aggregate is not None  # guaranteed by agg_over_last_dim
             return self._aggregate_across_blocks(
-                all_results, target_blocks, datatypes, schema,
+                all_results, target_blocks, query.datatype, schema,
                 query.aggregate, array_selections, query.diagonal,
-                first_dt_spec,
+                dt_spec,
             )
 
         if len(target_blocks) == 1:
             return self._single_block_response(
-                all_results, target_blocks, datatypes, schema,
+                all_results, target_blocks, query.datatype, schema,
                 array_selections, within_block_agg, query,
-                first_dt_spec,
+                dt_spec,
             )
 
         return self._multi_block_response(
-            all_results, target_blocks, datatypes, schema,
+            all_results, target_blocks, query.datatype, schema,
             array_selections, within_block_agg, query, last_dim,
-            first_dt_spec,
+            dt_spec,
         )
 
     def _aggregate_across_blocks(
         self,
-        all_results: dict[str, dict[str, np.ndarray]],
+        all_results: dict[str, np.ndarray],
         target_blocks: list[str],
-        datatypes: list[str],
-        schema: dict,
+        datatype: str,
+        schema: SchemaDict,
         aggregate: AggregateSpec,
         array_selections: dict[str, int | str],
         diagonal: tuple[str, str] | None,
-        dt_spec: dict | None,
+        dt_spec: DatatypeDict | None,
     ) -> QueryOut:
         """Aggregate raw values across blocks.
 
         Collects raw per-block arrays, stacks them along axis 0, then applies the
         aggregation once — never mean-of-means (or median-of-medians, etc.).
         """
-        data: dict[str, list | float | int | None] = {}
-        sample_arr = None
-
-        for dt in datatypes:
-            stacked = np.stack([all_results[b][dt] for b in target_blocks])
-            agg_result = _aggregate_array(stacked, 0, aggregate)
-            data[dt] = _numpy_to_json(agg_result)
-            if sample_arr is None:
-                sample_arr = agg_result
+        stacked = np.stack([all_results[b] for b in target_blocks])
+        sample_arr = _aggregate_array(stacked, 0, aggregate)
+        data: dict[str, list | float | int | None] = {datatype: _numpy_to_json(sample_arr)}
 
         index = self._build_index(dt_spec, schema, array_selections, aggregate, diagonal)
-        shape = list(sample_arr.shape) if sample_arr is not None and sample_arr.ndim > 0 else []
+        shape = list(sample_arr.shape) if sample_arr.ndim > 0 else []
 
         return QueryOut(
             blocks=target_blocks,
@@ -318,31 +308,25 @@ class QueryService:
 
     def _single_block_response(
         self,
-        all_results: dict[str, dict[str, np.ndarray]],
+        all_results: dict[str, np.ndarray],
         target_blocks: list[str],
-        datatypes: list[str],
-        schema: dict,
+        datatype: str,
+        schema: SchemaDict,
         array_selections: dict[str, int | str],
         within_block_agg: bool,
         query: QueryIn,
-        dt_spec: dict | None,
+        dt_spec: DatatypeDict | None,
     ) -> QueryOut:
         block = target_blocks[0]
-        data: dict[str, list | float | int | None] = {}
-        sample_arr = None
-
-        for dt in datatypes:
-            arr = all_results[block][dt]
-            data[dt] = _numpy_to_json(arr)
-            if sample_arr is None:
-                sample_arr = arr
+        sample_arr = all_results[block]
+        data: dict[str, list | float | int | None] = {datatype: _numpy_to_json(sample_arr)}
 
         index = self._build_index(
             dt_spec, schema, array_selections,
             query.aggregate if within_block_agg else None,
             query.diagonal,
         )
-        shape = list(sample_arr.shape) if sample_arr is not None and sample_arr.ndim > 0 else []
+        shape = list(sample_arr.shape) if sample_arr.ndim > 0 else []
 
         return QueryOut(
             blocks=target_blocks,
@@ -353,30 +337,24 @@ class QueryService:
 
     def _multi_block_response(
         self,
-        all_results: dict[str, dict[str, np.ndarray]],
+        all_results: dict[str, np.ndarray],
         target_blocks: list[str],
-        datatypes: list[str],
-        schema: dict,
+        datatype: str,
+        schema: SchemaDict,
         array_selections: dict[str, int | str],
         within_block_agg: bool,
         query: QueryIn,
         last_dim: str,
-        dt_spec: dict | None,
+        dt_spec: DatatypeDict | None,
     ) -> QueryOut:
         """Build response for multi-block queries without cross-block aggregation.
 
         The last_dimension appears in the index as a regular dimension.
         Data arrays gain an extra leading dimension for blocks.
         """
-        data: dict[str, list | float | int | None] = {}
-        sample_arr = None
-
-        for dt in datatypes:
-            per_block = [all_results[b][dt] for b in target_blocks]
-            stacked = np.stack(per_block)
-            data[dt] = _numpy_to_json(stacked)
-            if sample_arr is None:
-                sample_arr = stacked
+        stacked = np.stack([all_results[b] for b in target_blocks])
+        sample_arr = stacked
+        data: dict[str, list | float | int | None] = {datatype: _numpy_to_json(stacked)}
 
         block_index = IndexLevel(dimension=last_dim, labels=target_blocks)
         inner_index = self._build_index(
@@ -386,7 +364,7 @@ class QueryService:
         )
         index = [block_index] + inner_index
 
-        shape = list(sample_arr.shape) if sample_arr is not None else []
+        shape = list(sample_arr.shape)
 
         return QueryOut(
             blocks=target_blocks,
@@ -397,8 +375,8 @@ class QueryService:
 
     def _build_index(
         self,
-        dt_spec: dict | None,
-        schema: dict,
+        dt_spec: DatatypeDict | None,
+        schema: SchemaDict,
         array_selections: dict[str, int | str],
         aggregate: AggregateSpec | None,
         diagonal: tuple[str, str] | None,
@@ -430,7 +408,7 @@ class QueryService:
         return index
 
     @staticmethod
-    def _get_dim_labels(schema: dict, dim_name: str) -> list:
+    def _get_dim_labels(schema: SchemaDict, dim_name: str) -> list:
         for d in schema["dimensions"]:
             if d["name"] == dim_name:
                 return d["labels"]

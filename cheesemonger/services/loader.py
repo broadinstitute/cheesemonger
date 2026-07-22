@@ -27,6 +27,7 @@ import xarray as xr
 from sqlalchemy.orm import Session
 
 from cheesemonger.crud import dataset as ds_crud
+from cheesemonger.models.dataset import SchemaDict
 from cheesemonger.schemas.common import ChunkDim, DatatypeSpec, Dimension, normalize_name
 from cheesemonger.schemas.dataset import DatasetIn
 from cheesemonger.services import dataset as ds_paths
@@ -93,7 +94,7 @@ def _infer_schema(
 
 
 def _validate_against_schema(
-    src: xr.Dataset, schema: dict, dataset: str, last_dimension: str
+    src: xr.Dataset, schema: SchemaDict, dataset: str, last_dimension: str
 ) -> None:
     """Ensure the source's dims and datatypes are declared in the dataset schema.
 

@@ -26,7 +26,7 @@ class AggregateSpec(BaseModel):
 
 
 class QueryIn(BaseModel):
-    datatype: str | list[str]
+    datatype: str
     select: list[Selection] = []
     aggregate: AggregateSpec | None = None
     diagonal: tuple[str, str] | None = None

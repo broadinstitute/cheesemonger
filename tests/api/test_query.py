@@ -101,25 +101,6 @@ def test_series_query(client, settings, db):
     assert body["data"]["ZScore"] == [0.0, 1.0, 2.0, 3.0]
 
 
-def test_multi_datatype_same_dims(client, settings, db):
-    """Batch of equally-shaped datatypes returns one entry per datatype."""
-    _setup(client, settings, db, {"SW620": _block(BASE, BASE + 0.5)})
-
-    r = _query(client, {
-        "datatype": ["ZScore", "L2FC"],
-        "select": [
-            {"dimension": "screen", "value": "SW620"},
-            {"dimension": "timepoint", "value": 4},
-            {"dimension": "testedperturbation", "value": "226"},
-        ],
-    })
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert set(body["data"]) == {"ZScore", "L2FC"}
-    assert body["data"]["ZScore"] == [4.0, 5.0, 6.0, 7.0]
-    assert body["data"]["L2FC"] == [4.5, 5.5, 6.5, 7.5]
-
-
 def test_within_block_mean(client, settings, db):
     """Mean over perturbation at a fixed timepoint -> one value per gene."""
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
@@ -369,7 +350,8 @@ def test_reduced_rank_ignores_inapplicable_selection(client, settings, db):
 # --- Validation (the bugs that motivated these fixes) ----------------------
 
 
-def test_batch_mixed_shapes_rejected(client, settings, db):
+def test_datatype_list_rejected(client, settings, db):
+    """Multiple datatypes per query are no longer supported; a list is a 422."""
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
 
     r = _query(client, {

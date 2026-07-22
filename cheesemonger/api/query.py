@@ -38,22 +38,13 @@ def query_data(
     dt_names = {d["name"] for d in schema["datatypes"]}
     valid_dims = dim_names | {last_dim}
 
-    datatypes = query.datatype if isinstance(query.datatype, list) else [query.datatype]
-    for dt in datatypes:
-        if dt not in dt_names:
-            raise HTTPException(status_code=400, detail=f"Unknown datatype: {dt}")
+    if query.datatype not in dt_names:
+        raise HTTPException(
+            status_code=400, detail=f"Unknown datatype: {query.datatype}"
+        )
 
     dt_dims = {d["name"]: d["dimensions"] for d in schema["datatypes"]}
-    batch_dims = dt_dims[datatypes[0]]
-    for dt in datatypes[1:]:
-        if dt_dims[dt] != batch_dims:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Datatypes in a batch must share the same dimensions: "
-                    f"'{dt}' has {dt_dims[dt]}, '{datatypes[0]}' has {batch_dims}"
-                ),
-            )
+    queried_dims = dt_dims[query.datatype]
 
     for sel in query.select:
         if sel.dimension not in valid_dims:
@@ -69,12 +60,12 @@ def query_data(
                 detail="Cannot combine 'diagonal' with 'aggregate' in one query",
             )
         for d in query.diagonal:
-            if d not in batch_dims:
+            if d not in queried_dims:
                 raise HTTPException(
                     status_code=422,
                     detail=(
                         f"diagonal dimension '{d}' is not a dimension "
-                        f"of datatype '{datatypes[0]}'"
+                        f"of datatype '{query.datatype}'"
                     ),
                 )
 
@@ -99,12 +90,12 @@ def query_data(
                 status_code=422,
                 detail=f"Cannot aggregate over '{over}': it is fixed by select",
             )
-        if over != last_dim and over not in batch_dims:
+        if over != last_dim and over not in queried_dims:
             raise HTTPException(
                 status_code=422,
                 detail=(
                     f"Cannot aggregate over '{over}': not a dimension "
-                    f"of datatype '{datatypes[0]}'"
+                    f"of datatype '{query.datatype}'"
                 ),
             )
 

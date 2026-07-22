@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from cheesemonger.models.dataset import Block, Dataset
+from cheesemonger.models.dataset import Block, Dataset, SchemaDict
 from cheesemonger.schemas.dataset import DatasetIn
 
 
@@ -42,7 +42,7 @@ def delete_dataset(db: Session, name: str) -> bool:
     return True
 
 
-def get_schema_dict(db: Session, name: str) -> dict | None:
+def get_schema_dict(db: Session, name: str) -> SchemaDict | None:
     """Return the dataset schema as a plain dict (for the query engine)."""
     ds = get_dataset_by_name(db, name)
     if ds is None:
