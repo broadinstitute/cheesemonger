@@ -38,6 +38,19 @@ def get_engine(sqlalchemy_database_url: str) -> Engine:
     )
 
 
+def init_db(sqlalchemy_database_url: str) -> None:
+    """Create all tables if they don't exist.
+
+    The single place schema creation lives. The app (startup.py) and the CLI
+    (__main__.py) both call it, so services never bootstrap the DB themselves.
+    Importing the models package registers every table on ``Base.metadata`` so
+    ``create_all`` sees them regardless of the caller's import order.
+    """
+    from .models import Base  # importing the package registers all tables
+
+    Base.metadata.create_all(bind=get_engine(sqlalchemy_database_url))
+
+
 def SessionLocal(sqlalchemy_database_url: str) -> Session:
     engine = get_engine(sqlalchemy_database_url)
     session = sessionmaker(

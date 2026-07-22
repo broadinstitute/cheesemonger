@@ -55,10 +55,9 @@ def create_app(settings: Settings) -> FastAPI:
 
     app.add_exception_handler(InvalidName, _invalid_name_handler)
 
-    # Create all tables on startup
-    from .db import get_engine
-    from .models.base import Base
-    Base.metadata.create_all(bind=get_engine(settings.sqlalchemy_database_url))
+    # Create all tables on startup (single source of truth in db.init_db).
+    from .db import init_db
+    init_db(settings.sqlalchemy_database_url)
 
     # --- Singleton services (stateful, shared across all requests) ---
 

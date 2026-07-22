@@ -189,7 +189,7 @@ def load_block(
     block: str,
     data_dir: str,
     *,
-    db: Session | None = None,
+    db: Session,
     last_dimension: str = "Screen",
     create_dataset: bool = False,
     overwrite: bool = False,
@@ -202,8 +202,8 @@ def load_block(
         dataset: Target dataset name.
         block: Block name (one value of the last dimension, e.g. a screen ID).
         data_dir: Root data directory the API serves from.
-        db: SQLAlchemy session for metadata operations. If None (CLI usage),
-            a temporary session is created from the default settings.
+        db: SQLAlchemy session for metadata operations. The caller owns the
+            session lifecycle (open/close); this function commits its work.
         last_dimension: Name of the block key (only used when creating).
         create_dataset: If the dataset doesn't exist, infer and create it.
         overwrite: Replace the block if it already exists.
@@ -216,13 +216,6 @@ def load_block(
         A summary dict (dataset, block, path, dimensions, datatypes).
     """
     block = _normalized_block(block)
-
-    owns_session = False
-    if db is None:
-        from cheesemonger.config import get_settings
-        from cheesemonger.db import SessionLocal
-        db = SessionLocal(get_settings().sqlalchemy_database_url)
-        owns_session = True
 
     logger.info("Opening source store: %s", source)
     try:
@@ -290,20 +283,9 @@ def load_block(
         }
     finally:
         src.close()
-        if owns_session:
-            db.close()
 
     logger.info("Loaded block %r into dataset %r", block, dataset)
     return summary
-
-
-def _open_session(db: Session | None) -> tuple[Session, bool]:
-    """Return (session, owns_session). Creates a temporary session if db is None."""
-    if db is not None:
-        return db, False
-    from cheesemonger.config import get_settings
-    from cheesemonger.db import SessionLocal
-    return SessionLocal(get_settings().sqlalchemy_database_url), True
 
 
 def delete_block(
@@ -311,29 +293,24 @@ def delete_block(
     block: str,
     data_dir: str,
     *,
-    db: Session | None = None,
+    db: Session,
 ) -> dict:
     """Delete a block: remove its DB row and its Zarr directory on disk.
 
-    Raises LoaderError if the dataset or block does not exist. Mirrors the
-    session handling of load_block (a temporary session is opened for CLI use).
+    Raises LoaderError if the dataset or block does not exist. The caller owns
+    the session lifecycle (open/close); this function commits its work.
     """
     block = _normalized_block(block)
-    db, owns_session = _open_session(db)
-    try:
-        if not ds_crud.dataset_exists(db, dataset):
-            raise LoaderError(f"Dataset {dataset!r} does not exist")
-        if not ds_crud.block_exists(db, dataset, block):
-            raise LoaderError(f"Block {block!r} does not exist in dataset {dataset!r}")
+    if not ds_crud.dataset_exists(db, dataset):
+        raise LoaderError(f"Dataset {dataset!r} does not exist")
+    if not ds_crud.block_exists(db, dataset, block):
+        raise LoaderError(f"Block {block!r} does not exist in dataset {dataset!r}")
 
-        ds_crud.delete_block(db, dataset, block)
-        block_path = ds_paths.block_dir(data_dir, dataset, block)
-        if block_path.exists():
-            shutil.rmtree(block_path)
-        db.commit()
-    finally:
-        if owns_session:
-            db.close()
+    ds_crud.delete_block(db, dataset, block)
+    block_path = ds_paths.block_dir(data_dir, dataset, block)
+    if block_path.exists():
+        shutil.rmtree(block_path)
+    db.commit()
 
     logger.info("Deleted block %r from dataset %r", block, dataset)
     return {"dataset": dataset, "block": block, "deleted": True}
@@ -343,7 +320,7 @@ def delete_dataset(
     dataset: str,
     data_dir: str,
     *,
-    db: Session | None = None,
+    db: Session,
     force: bool = False,
 ) -> dict:
     """Delete a dataset and its on-disk directory.
@@ -351,31 +328,27 @@ def delete_dataset(
     Refuses if the dataset still has blocks unless ``force=True``, in which case
     its blocks are deleted first (their FK is RESTRICT, so block rows must be
     removed before the dataset row). Raises LoaderError if it doesn't exist.
+    The caller owns the session lifecycle (open/close); this function commits.
     """
-    db, owns_session = _open_session(db)
-    try:
-        if not ds_crud.dataset_exists(db, dataset):
-            raise LoaderError(f"Dataset {dataset!r} does not exist")
+    if not ds_crud.dataset_exists(db, dataset):
+        raise LoaderError(f"Dataset {dataset!r} does not exist")
 
-        block_names = ds_crud.list_block_names(db, dataset)
-        if block_names and not force:
-            raise LoaderError(
-                f"Dataset {dataset!r} still has {len(block_names)} block(s): "
-                f"{', '.join(block_names)}. Delete them first or pass force=True."
-            )
+    block_names = ds_crud.list_block_names(db, dataset)
+    if block_names and not force:
+        raise LoaderError(
+            f"Dataset {dataset!r} still has {len(block_names)} block(s): "
+            f"{', '.join(block_names)}. Delete them first or pass force=True."
+        )
 
-        for b in block_names:
-            ds_crud.delete_block(db, dataset, b)
-        ds_crud.delete_dataset(db, dataset)
+    for b in block_names:
+        ds_crud.delete_block(db, dataset, b)
+    ds_crud.delete_dataset(db, dataset)
 
-        # rmtree the dataset dir removes the blocks/ subtree in one shot.
-        ds_dir = ds_paths.dataset_dir(data_dir, dataset)
-        if ds_dir.exists():
-            shutil.rmtree(ds_dir)
-        db.commit()
-    finally:
-        if owns_session:
-            db.close()
+    # rmtree the dataset dir removes the blocks/ subtree in one shot.
+    ds_dir = ds_paths.dataset_dir(data_dir, dataset)
+    if ds_dir.exists():
+        shutil.rmtree(ds_dir)
+    db.commit()
 
     logger.info("Deleted dataset %r (%d block(s))", dataset, len(block_names))
     return {"dataset": dataset, "deleted": True, "blocks_deleted": len(block_names)}
