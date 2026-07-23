@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -225,27 +225,31 @@ class QueryService:
         # parallel I/O.
         all_results: dict[str, np.ndarray] = {}
 
-        def _read_block(block_name: str) -> tuple[str, np.ndarray]:
+        def _read_block(block_name: str) -> np.ndarray:
             block_path = get_block_path(block_name)
-            ds = xr.open_zarr(str(block_path))
             try:
-                arr = _read_datatype_from_ds(
-                    ds, query.datatype, array_selections,
-                    query.aggregate if within_block_agg else None,
-                    query.diagonal,
-                )
-            finally:
-                ds.close()
-            return block_name, arr
+                ds = xr.open_zarr(str(block_path))
+                try:
+                    return _read_datatype_from_ds(
+                        ds, query.datatype, array_selections,
+                        query.aggregate if within_block_agg else None,
+                        query.diagonal,
+                    )
+                finally:
+                    ds.close()
+            except QueryError:
+                raise
+            except Exception as e:
+                # Attach the block name so failures point at the problematic folder.
+                raise QueryError(f"Failed reading block {block_name!r}: {e}") from e
 
         if len(target_blocks) == 1:
-            name, res = _read_block(target_blocks[0])
-            all_results[name] = res
+            all_results[target_blocks[0]] = _read_block(target_blocks[0])
         else:
-            futures = [self.executor.submit(_read_block, b) for b in target_blocks]
-            for future in as_completed(futures):
-                name, res = future.result()
-                all_results[name] = res
+            # executor.map yields results in submission order, so zip re-pairs
+            # each array with its block without threading the name through.
+            results = self.executor.map(_read_block, target_blocks)
+            all_results = dict(zip(target_blocks, results))
 
         # Determine the queried datatype's spec for building the index
         dt_spec = None
