@@ -43,15 +43,15 @@ class BlockInfo(BaseModel):
 class DimensionInfo(BaseModel):
     name: str
     size: int
-    labels: list[int] | list[str] | None = None
+    labels: list[str] | None = None
     labels_truncated: bool = False
-    labels_sample: list[int] | list[str] | None = None
+    labels_sample: list[str] | None = None
 
 
 class DimensionLabelsOut(BaseModel):
     name: str
     size: int  # total number of labels (before any offset/limit paging)
-    labels: list[int] | list[str]
+    labels: list[str]
 
 
 class DatasetDetail(BaseModel):

@@ -79,7 +79,7 @@ graph TB
 | Component | Role |
 |-----------|------|
 | **FastAPI Server** | Serves REST API, validates requests via Pydantic, reads blocks via `xr.open_zarr()` |
-| **ThreadPool (4 workers)** | Parallelizes multi-block and multi-datatype reads within a single request |
+| **ThreadPool (4 workers)** | Parallelizes multi-block reads within a single request (each read pulls all requested datatypes) |
 | **Gene Mapping Cache** | In-memory entrez ↔ symbol mapping, loaded from Taiga at startup |
 | **Hyperdisk** | High-performance block storage mounted at `/mnt/data/`. Stores all Zarr data. |
 | **Block (xarray Dataset as Zarr)** | One folder per screen. Contains an xarray Dataset with data variables (datatypes) and coordinate arrays (dimension labels). Written by `xarray.Dataset.to_zarr()`. |
@@ -105,7 +105,7 @@ sequenceDiagram
     participant Z as Zarr Store<br/>(SW620/)
 
     C->>A: POST /datasets/pesca/query
-    Note right of C: {"datatype": "ZScore",<br/>"select": [<br/>  {screen: SW620},<br/>  {timepoint: 4},<br/>  {perturbation: 4193}<br/>]}
+    Note right of C: {"datatypes": ["ZScore"],<br/>"select": [<br/>  {screen: SW620},<br/>  {timepoint: 4},<br/>  {perturbation: 4193}<br/>]}
 
     A->>V: Validate against schema
     V-->>A: ✓ All fields valid

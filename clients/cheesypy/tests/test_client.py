@@ -31,7 +31,7 @@ def test_series_builds_request_and_returns_series():
     out = cm.series("perturb-scuba", "ZScore", screen="PS-SC-1", Timepoint="D4", Target="23293")
 
     assert captured["path"] == "/datasets/perturb-scuba/query"
-    assert captured["body"]["datatype"] == "ZScore"
+    assert captured["body"]["datatypes"] == ["ZScore"]
     assert {"dimension": "screen", "value": "PS-SC-1"} in captured["body"]["select"]
     assert {"dimension": "Target", "value": "23293"} in captured["body"]["select"]
     assert isinstance(out, pd.Series)
@@ -58,8 +58,7 @@ def test_aggregate_sends_spec():
     def handler(request):
         body = json.loads(request.content)
         captured["body"] = body
-        dt = body["datatype"]
-        dts = dt if isinstance(dt, list) else [dt]
+        dts = body["datatypes"]
         return httpx.Response(200, json={
             "blocks": ["S1"], "aggregation": "mean", "shape": [2],
             "index": [{"dimension": "Response", "labels": ["a", "b"]}],

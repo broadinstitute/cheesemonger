@@ -6,6 +6,7 @@ from being individual rows — they're always read and written as a unit.
 """
 
 from datetime import UTC, datetime
+from typing import TypedDict
 
 from sqlalchemy import JSON, DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -13,14 +14,40 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .base import Base, UUIDMixin
 
 
+class DimensionDict(TypedDict):
+    name: str
+    labels: list[str]
+
+
+class DatatypeDict(TypedDict):
+    name: str
+    dimensions: list[str]
+    dtype: str
+
+
+class ChunkDimDict(TypedDict):
+    name: str
+    size: int
+
+
+class SchemaDict(TypedDict):
+    name: str
+    last_dimension: str
+    dimensions: list[DimensionDict]
+    datatypes: list[DatatypeDict]
+    chunk_shape: list[ChunkDimDict]
+
+
 class Dataset(Base, UUIDMixin):
     __tablename__ = "dataset"
 
     name: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
     last_dimension: Mapped[str] = mapped_column(String, nullable=False)
-    dimensions: Mapped[list] = mapped_column(JSON, nullable=False)
-    datatypes: Mapped[list] = mapped_column(JSON, nullable=False)
-    chunk_shape: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    dimensions: Mapped[list[DimensionDict]] = mapped_column(JSON, nullable=False)
+    datatypes: Mapped[list[DatatypeDict]] = mapped_column(JSON, nullable=False)
+    chunk_shape: Mapped[list[ChunkDimDict]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )

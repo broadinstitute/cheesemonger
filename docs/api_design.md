@@ -108,7 +108,7 @@ Shared type definitions used across endpoints.
 ```python
 class Dimension(BaseModel):
     name: str                              # e.g. "timepoint"
-    labels: list[int] | list[str]          # e.g. [4, 7] or ["103", "226", ...]
+    labels: list[str]                      # e.g. ["4", "7"] or ["103", "226", ...]
 
 class DatatypeSpec(BaseModel):
     name: str                              # e.g. "ZScore"
@@ -156,7 +156,7 @@ A `Selection` fixes a dimension to a single coordinate label, removing it from t
 ```python
 class IndexLevel(BaseModel):
     dimension: str                         # e.g. "testedgeneexpression"
-    labels: list[int | str]                # e.g. ["29974", "127550", ...] (raw labels)
+    labels: list[str]                      # e.g. ["29974", "127550", ...] (raw labels)
 ```
 
 ---
@@ -370,7 +370,7 @@ Patterns 1-5 are single-block queries. Patterns 6-9 are cross-block queries (N b
 
 ```json
 {
-  "datatype": "ZScore",
+  "datatypes": ["ZScore"],
   "select": [
     {"dimension": "screen", "value": "SW620"},
     {"dimension": "timepoint", "value": 4},
@@ -383,7 +383,7 @@ Patterns 1-5 are single-block queries. Patterns 6-9 are cross-block queries (N b
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `datatype` | string or [string] | yes | Datatype(s) to read. String for one, list for batch. |
+| `datatypes` | [string] | yes | One or more datatypes to read at the same coordinates (at least one). Multiple datatypes must share dimensions; they come back under `data`, keyed by name, sharing one `index`. |
 | `select` | list[Selection] | yes | Dimensions to fix. Includes the last dimension (e.g. `"screen"`). Omitting a dimension means "all values." |
 | `aggregate` | AggregateSpec or null | no | Aggregation specification (see below) |
 | `diagonal` | [string, string] or null | no | Two dimension names for diagonal extraction |
@@ -456,7 +456,7 @@ Fixes block, timepoint, and perturbation; returns the gene expression vector.
 
 ```json
 {
-  "datatype": "ZScore",
+  "datatypes": ["ZScore"],
   "select": [
     {"dimension": "screen", "value": "SW620"},
     {"dimension": "timepoint", "value": 4},
@@ -489,7 +489,7 @@ Expected latency: **~40 ms**.
 
 ```json
 {
-  "datatype": "ZScore",
+  "datatypes": ["ZScore"],
   "select": [
     {"dimension": "screen", "value": "SW620"},
     {"dimension": "timepoint", "value": 4}
@@ -522,7 +522,7 @@ Expected latency: **~450 ms**.
 
 ```json
 {
-  "datatype": "FDR",
+  "datatypes": ["FDR"],
   "select": [
     {"dimension": "screen", "value": "SW620"},
     {"dimension": "timepoint", "value": 4}
@@ -555,7 +555,7 @@ Expected latency: **~450 ms**.
 
 ```json
 {
-  "datatype": "L2FC",
+  "datatypes": ["L2FC"],
   "select": [
     {"dimension": "screen", "value": "SW620"},
     {"dimension": "timepoint", "value": 4}
@@ -588,7 +588,7 @@ Expected latency: **~40 ms**.
 
 ```json
 {
-  "datatype": ["L2FC", "neg_log10_FDR", "FDR"],
+  "datatypes": ["L2FC", "neg_log10_FDR", "FDR"],
   "select": [
     {"dimension": "screen", "value": "SW620"},
     {"dimension": "timepoint", "value": 4},
@@ -627,7 +627,7 @@ All array dimensions are fixed, so each block produces a scalar. The last dimens
 
 ```json
 {
-  "datatype": "ZScore",
+  "datatypes": ["ZScore"],
   "select": [
     {"dimension": "timepoint", "value": 7},
     {"dimension": "testedperturbation", "value": "4193"},
@@ -661,7 +661,7 @@ No free dimensions → scalar result. `blocks` lists the 30 screens that contrib
 
 ```json
 {
-  "datatype": ["ZScore", "L2FC", "FDR"],
+  "datatypes": ["ZScore", "L2FC", "FDR"],
   "select": [
     {"dimension": "timepoint", "value": 7},
     {"dimension": "testedperturbation", "value": "4193"},
@@ -701,7 +701,7 @@ Only timepoint and perturbation are fixed; `testedgeneexpression` is free, so ea
 
 ```json
 {
-  "datatype": "ZScore",
+  "datatypes": ["ZScore"],
   "select": [
     {"dimension": "timepoint", "value": 4},
     {"dimension": "testedperturbation", "value": "1173"}
@@ -739,9 +739,9 @@ Since the API only supports single-value selections, this requires **3 separate 
 Each query fixes timepoint, perturbation, and one response gene. Screen is omitted → all blocks queried.
 
 ```json
-{"datatype": "ZScore", "select": [{"dimension": "timepoint", "value": 7}, {"dimension": "testedperturbation", "value": "7037"}, {"dimension": "testedgeneexpression", "value": "3939"}]}
-{"datatype": "ZScore", "select": [{"dimension": "timepoint", "value": 7}, {"dimension": "testedperturbation", "value": "7037"}, {"dimension": "testedgeneexpression", "value": "226"}]}
-{"datatype": "ZScore", "select": [{"dimension": "timepoint", "value": 7}, {"dimension": "testedperturbation", "value": "7037"}, {"dimension": "testedgeneexpression", "value": "5230"}]}
+{"datatypes": ["ZScore"], "select": [{"dimension": "timepoint", "value": 7}, {"dimension": "testedperturbation", "value": "7037"}, {"dimension": "testedgeneexpression", "value": "3939"}]}
+{"datatypes": ["ZScore"], "select": [{"dimension": "timepoint", "value": 7}, {"dimension": "testedperturbation", "value": "7037"}, {"dimension": "testedgeneexpression", "value": "226"}]}
+{"datatypes": ["ZScore"], "select": [{"dimension": "timepoint", "value": 7}, {"dimension": "testedperturbation", "value": "7037"}, {"dimension": "testedgeneexpression", "value": "5230"}]}
 ```
 
 Each response returns one scalar per block (all array dimensions are fixed, only `screen` is free):
