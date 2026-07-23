@@ -16,7 +16,7 @@ from .base import Base, UUIDMixin
 
 class DimensionDict(TypedDict):
     name: str
-    labels: list[int] | list[str]
+    labels: list[str]
 
 
 class DatatypeDict(TypedDict):

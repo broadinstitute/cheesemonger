@@ -128,7 +128,7 @@ plain dicts. Shapes:
 {"name": "Timepoint", "labels": ["D4", "D7"]}
 ```
 - `name`: `SafeName` (see §7).
-- `labels`: `list[int] | list[str]`, ≤ 50,000. Order is the array's coordinate order.
+- `labels`: `list[str]`, ≤ 50,000. Numeric keys (timepoints, ranks) are stored as strings too. Order is the array's coordinate order.
 
 **DatatypeSpec** — one measured array and the dimensions it spans.
 ```json

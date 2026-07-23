@@ -38,13 +38,24 @@ def query_data(
     dt_names = {d["name"] for d in schema["datatypes"]}
     valid_dims = dim_names | {last_dim}
 
-    if query.datatype not in dt_names:
-        raise HTTPException(
-            status_code=400, detail=f"Unknown datatype: {query.datatype}"
-        )
+    for dt in query.datatypes:
+        if dt not in dt_names:
+            raise HTTPException(status_code=400, detail=f"Unknown datatype: {dt}")
 
+    # All datatypes in one query share the response index, so they must share
+    # dimensions (e.g. L2FC + FDR over the same gene axis for a volcano plot).
     dt_dims = {d["name"]: d["dimensions"] for d in schema["datatypes"]}
-    queried_dims = dt_dims[query.datatype]
+    queried_dims = dt_dims[query.datatypes[0]]
+    for dt in query.datatypes[1:]:
+        if dt_dims[dt] != queried_dims:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Datatypes in one query must share dimensions: "
+                    f"'{dt}' has {dt_dims[dt]}, "
+                    f"'{query.datatypes[0]}' has {queried_dims}"
+                ),
+            )
 
     for sel in query.select:
         if sel.dimension not in valid_dims:
@@ -65,7 +76,7 @@ def query_data(
                     status_code=422,
                     detail=(
                         f"diagonal dimension '{d}' is not a dimension "
-                        f"of datatype '{query.datatype}'"
+                        f"of datatype '{query.datatypes[0]}'"
                     ),
                 )
 
@@ -95,7 +106,7 @@ def query_data(
                 status_code=422,
                 detail=(
                     f"Cannot aggregate over '{over}': not a dimension "
-                    f"of datatype '{query.datatype}'"
+                    f"of datatype '{query.datatypes[0]}'"
                 ),
             )
 

@@ -17,7 +17,7 @@ import xarray as xr
 from cheesemonger.crud import dataset as ds_crud
 from cheesemonger.schemas.dataset import DatasetIn
 
-TP = [4, 7]
+TP = ["4", "7"]
 PERT = ["103", "226", "672"]
 GENE = ["103", "226", "672", "7157"]
 
@@ -86,7 +86,7 @@ def test_series_query(client, settings, db):
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
 
     r = _query(client, {
-        "datatype": "ZScore",
+        "datatypes": ["ZScore"],
         "select": [
             {"dimension": "screen", "value": "SW620"},
             {"dimension": "timepoint", "value": 4},
@@ -101,12 +101,33 @@ def test_series_query(client, settings, db):
     assert body["data"]["ZScore"] == [0.0, 1.0, 2.0, 3.0]
 
 
+def test_multi_datatype_same_dims(client, settings, db):
+    """Several datatypes at the same coordinates return one entry each, sharing
+    one index (the volcano-plot case)."""
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE + 0.5)})
+
+    r = _query(client, {
+        "datatypes": ["ZScore", "L2FC"],
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "226"},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body["data"]) == {"ZScore", "L2FC"}
+    assert body["data"]["ZScore"] == [4.0, 5.0, 6.0, 7.0]
+    assert body["data"]["L2FC"] == [4.5, 5.5, 6.5, 7.5]
+    assert [lvl["dimension"] for lvl in body["index"]] == ["testedgeneexpression"]
+
+
 def test_within_block_mean(client, settings, db):
     """Mean over perturbation at a fixed timepoint -> one value per gene."""
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
 
     r = _query(client, {
-        "datatype": "ZScore",
+        "datatypes": ["ZScore"],
         "select": [
             {"dimension": "screen", "value": "SW620"},
             {"dimension": "timepoint", "value": 4},
@@ -125,7 +146,7 @@ def test_count_lt(client, settings, db):
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
 
     r = _query(client, {
-        "datatype": "ZScore",
+        "datatypes": ["ZScore"],
         "select": [
             {"dimension": "screen", "value": "SW620"},
             {"dimension": "timepoint", "value": 4},
@@ -143,7 +164,7 @@ def test_within_block_count_gt(client, settings, db):
     """count_gt over gene expression -> one count per perturbation."""
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
     r = _query(client, {
-        "datatype": "ZScore",
+        "datatypes": ["ZScore"],
         "select": [
             {"dimension": "screen", "value": "SW620"},
             {"dimension": "timepoint", "value": 4},
@@ -159,7 +180,7 @@ def test_within_block_abs_gt(client, settings, db):
     """abs_gt counts large-magnitude values in either direction."""
     _setup(client, settings, db, {"SW620": _block(BASE - 6, BASE - 6)})
     r = _query(client, {
-        "datatype": "ZScore",
+        "datatypes": ["ZScore"],
         "select": [
             {"dimension": "screen", "value": "SW620"},
             {"dimension": "timepoint", "value": 4},
@@ -184,7 +205,7 @@ def test_within_block_min_max_median(client, settings, db):
     }
     for how, expected in cases.items():
         r = _query(client, {
-            "datatype": "ZScore", "select": sel,
+            "datatypes": ["ZScore"], "select": sel,
             "aggregate": {"type": how, "over": "testedgeneexpression"},
         })
         assert r.status_code == 200, r.text
@@ -196,7 +217,7 @@ def test_within_block_count_excludes_nan(client, settings, db):
     arr[0, 0, 0] = np.nan  # tp=4, first perturbation, first gene
     _setup(client, settings, db, {"SW620": _block(arr, arr)})
     r = _query(client, {
-        "datatype": "ZScore",
+        "datatypes": ["ZScore"],
         "select": [
             {"dimension": "screen", "value": "SW620"},
             {"dimension": "timepoint", "value": 4},
@@ -215,7 +236,7 @@ def test_cross_block_max(client, settings, db):
         "HT29": _block(BASE + 100, BASE + 100),
     })
     r = _query(client, {
-        "datatype": "ZScore",
+        "datatypes": ["ZScore"],
         "select": [
             {"dimension": "timepoint", "value": 4},
             {"dimension": "testedperturbation", "value": "103"},
@@ -231,7 +252,7 @@ def test_cross_block_max(client, settings, db):
 def test_count_gt_requires_threshold(client, settings, db):
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
     r = _query(client, {
-        "datatype": "ZScore",
+        "datatypes": ["ZScore"],
         "select": [
             {"dimension": "screen", "value": "SW620"},
             {"dimension": "timepoint", "value": 4},
@@ -250,7 +271,7 @@ def test_cross_block_mean(client, settings, db):
     })
 
     r = _query(client, {
-        "datatype": "ZScore",
+        "datatypes": ["ZScore"],
         "select": [
             {"dimension": "timepoint", "value": 4},
             {"dimension": "testedperturbation", "value": "103"},
@@ -273,7 +294,7 @@ def test_multi_block_no_aggregation(client, settings, db):
     })
 
     r = _query(client, {
-        "datatype": "ZScore",
+        "datatypes": ["ZScore"],
         "select": [
             {"dimension": "timepoint", "value": 4},
             {"dimension": "testedperturbation", "value": "103"},
@@ -294,7 +315,7 @@ def test_diagonal(client, settings, db):
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
 
     r = _query(client, {
-        "datatype": "L2FC",
+        "datatypes": ["L2FC"],
         "select": [
             {"dimension": "screen", "value": "SW620"},
             {"dimension": "timepoint", "value": 4},
@@ -313,7 +334,7 @@ def test_reduced_rank_datatype(client, settings, db):
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
 
     r = _query(client, {
-        "datatype": "nCtrlCells",
+        "datatypes": ["nCtrlCells"],
         "select": [
             {"dimension": "screen", "value": "SW620"},
             {"dimension": "timepoint", "value": 7},
@@ -334,7 +355,7 @@ def test_reduced_rank_ignores_inapplicable_selection(client, settings, db):
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
 
     r = _query(client, {
-        "datatype": "nCtrlCells",
+        "datatypes": ["nCtrlCells"],
         "select": [
             {"dimension": "screen", "value": "SW620"},
             {"dimension": "timepoint", "value": 7},
@@ -350,12 +371,15 @@ def test_reduced_rank_ignores_inapplicable_selection(client, settings, db):
 # --- Validation (the bugs that motivated these fixes) ----------------------
 
 
-def test_datatype_list_rejected(client, settings, db):
-    """Multiple datatypes per query are no longer supported; a list is a 422."""
+def test_datatypes_mismatched_dims_rejected(client, settings, db):
+    """Datatypes in one query must share dimensions (they share one index).
+
+    ZScore spans 3 dims, nCtrlCells only timepoint -> 422.
+    """
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
 
     r = _query(client, {
-        "datatype": ["ZScore", "nCtrlCells"],
+        "datatypes": ["ZScore", "nCtrlCells"],
         "select": [
             {"dimension": "screen", "value": "SW620"},
             {"dimension": "timepoint", "value": 4},
@@ -364,11 +388,22 @@ def test_datatype_list_rejected(client, settings, db):
     assert r.status_code == 422, r.text
 
 
+def test_empty_datatypes_rejected(client, settings, db):
+    """datatypes must have at least one entry (min_length=1) -> 422."""
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
+
+    r = _query(client, {
+        "datatypes": [],
+        "select": [{"dimension": "screen", "value": "SW620"}],
+    })
+    assert r.status_code == 422, r.text
+
+
 def test_aggregate_over_dim_not_in_datatype_rejected(client, settings, db):
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
 
     r = _query(client, {
-        "datatype": "nCtrlCells",
+        "datatypes": ["nCtrlCells"],
         "select": [{"dimension": "screen", "value": "SW620"}],
         "aggregate": {"type": "mean", "over": "testedperturbation"},
     })
@@ -379,7 +414,7 @@ def test_diagonal_with_aggregate_rejected(client, settings, db):
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
 
     r = _query(client, {
-        "datatype": "ZScore",
+        "datatypes": ["ZScore"],
         "select": [
             {"dimension": "screen", "value": "SW620"},
             {"dimension": "timepoint", "value": 4},
@@ -394,7 +429,7 @@ def test_unknown_selection_value_names_the_value(client, settings, db):
     """A bad label produces a clear error naming the offending dim=value."""
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
     r = _query(client, {
-        "datatype": "ZScore",
+        "datatypes": ["ZScore"],
         "select": [
             {"dimension": "screen", "value": "SW620"},
             {"dimension": "testedperturbation", "value": "NOSUCHGENE"},
@@ -408,7 +443,7 @@ def test_unknown_selection_value_names_the_value(client, settings, db):
 def test_unknown_block_is_404(client, settings, db):
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
     r = _query(client, {
-        "datatype": "ZScore",
+        "datatypes": ["ZScore"],
         "select": [{"dimension": "screen", "value": "NOPE"}],
     })
     assert r.status_code == 404, r.text

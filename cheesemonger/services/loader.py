@@ -39,16 +39,20 @@ class LoaderError(Exception):
     """Raised for data-loading problems (unreadable source, schema mismatch)."""
 
 
-def _coord_labels(src: xr.Dataset, dim: str) -> list:
-    """Return a dimension's coordinate labels as a JSON-friendly list.
+def _coord_labels(src: xr.Dataset, dim: str) -> list[str]:
+    """Return a dimension's coordinate labels as a list of strings.
 
-    Falls back to integer positions if the dimension has no coordinate array.
+    Labels are stored as strings uniformly (entrez IDs, screen names, and
+    numeric keys like timepoints/ranks alike) — see ``_stringify_coords``, which
+    applies the same conversion to the on-disk Zarr coordinates so schema labels
+    and store coordinates stay in lock-step. Falls back to integer positions
+    (stringified) if the dimension has no coordinate array.
     """
     if dim in src.coords:
         values = src.coords[dim].values.tolist()
     else:
         values = list(range(int(src.sizes[dim])))
-    return [v if isinstance(v, int) and not isinstance(v, bool) else str(v) for v in values]
+    return [str(v) for v in values]
 
 
 def _infer_schema(
@@ -150,6 +154,20 @@ def _rechunk(ds: xr.Dataset, chunk_shape: dict[str, int] | None) -> xr.Dataset:
     return ds
 
 
+def _stringify_coords(ds: xr.Dataset) -> xr.Dataset:
+    """Store every coordinate array as strings.
+
+    Coordinate labels are the query's lookup keys, and cheesemonger keys on
+    strings uniformly (entrez IDs, screen names, and numeric keys like
+    timepoints/ranks alike). Converting here — with the same ``str()`` that
+    ``_coord_labels`` applies to the schema — keeps the on-disk coordinates and
+    the schema labels identical, so ``.sel()`` matches the labels clients see.
+    """
+    return ds.assign_coords(
+        {c: [str(v) for v in ds.coords[c].values.tolist()] for c in ds.coords}
+    )
+
+
 def _write_dataset(
     ds: xr.Dataset, dest: str, chunk_shape: dict[str, int] | None = None
 ) -> None:
@@ -158,7 +176,7 @@ def _write_dataset(
         for key in ("chunks", "preferred_chunks"):
             var.encoding.pop(key, None)
 
-    rechunked = _rechunk(ds, chunk_shape)
+    rechunked = _rechunk(_stringify_coords(ds), chunk_shape)
 
     try:
         from dask.diagnostics import ProgressBar  # type: ignore[attr-defined]

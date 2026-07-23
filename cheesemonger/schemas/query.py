@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Selection(BaseModel):
@@ -26,7 +26,11 @@ class AggregateSpec(BaseModel):
 
 
 class QueryIn(BaseModel):
-    datatype: str
+    # Always a list, even for one datatype. Reading several quantities at the
+    # same coordinates in one request (e.g. L2FC + FDR for a volcano plot) opens
+    # each block's store once and shares one response index. The datatypes must
+    # share dimensions which is validated in the router.
+    datatypes: list[str] = Field(min_length=1)
     select: list[Selection] = []
     aggregate: AggregateSpec | None = None
     diagonal: tuple[str, str] | None = None
@@ -34,7 +38,7 @@ class QueryIn(BaseModel):
 
 class IndexLevel(BaseModel):
     dimension: str
-    labels: Sequence[int | str]
+    labels: Sequence[str]
 
 
 class QueryOut(BaseModel):

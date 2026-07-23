@@ -214,7 +214,7 @@ curl -s localhost:8000/datasets/perturb-scuba | python3 -m json.tool
 curl -s localhost:8000/datasets/perturb-scuba/query \
   -H 'content-type: application/json' \
   -d '{
-    "datatype": "ZScore",
+    "datatypes": ["ZScore"],
     "select": [
       {"dimension": "screen", "value": "PS-SC-1"},
       {"dimension": "Timepoint", "value": "D4"},
@@ -226,7 +226,7 @@ curl -s localhost:8000/datasets/perturb-scuba/query \
 curl -s localhost:8000/datasets/perturb-scuba/query \
   -H 'content-type: application/json' \
   -d '{
-    "datatype": "ZScore",
+    "datatypes": ["ZScore"],
     "select": [
       {"dimension": "screen", "value": "PS-SC-1"},
       {"dimension": "Timepoint", "value": "D4"}
@@ -298,7 +298,7 @@ cheesemonger/
 
 - **Storage:** Each block (screen) is an xarray Dataset exported as Zarr on Hyperdisk. Data is written via `xarray.Dataset.to_zarr()`, which embeds coordinate labels alongside data variables.
 - **Loading:** A CLI loader (`python -m cheesemonger load`) ingests source Zarr stores (local or `gs://`) into the data directory, inferring or validating the dataset schema. See [Loading & retrieving data](#loading--retrieving-data).
-- **Query engine:** Reads blocks via `xarray.open_zarr()` with `.sel()` for label-based indexing. Uses ThreadPoolExecutor for parallel multi-block reads.
+- **Query engine:** Reads blocks via `xarray.open_zarr()` with `.sel()` for label-based indexing. Uses ThreadPoolExecutor for parallel multi-block reads; a single query can read several datatypes at the same coordinates.
 - **Gene mapping:** Loaded from Taiga at startup, served via `/gene_mappings` for client-side translation
 
 See `[docs/architecture_diagram.md](docs/architecture_diagram.md)` for system diagrams.
