@@ -96,7 +96,7 @@ def test_loaded_block_is_queryable(tmp_path, loader_db):
     qs = QueryService(thread_pool_size=2)
     out = qs.execute(
         QueryIn(
-            datatype="ZScore",
+            datatypes=["ZScore"],
             select=[
                 Selection(dimension="screen", value="PS-SC-1"),
                 Selection(dimension="Timepoint", value="D4"),
@@ -151,7 +151,7 @@ def test_unbroadcasted_store_loads_and_queries(tmp_path, loader_db):
     qs = QueryService(thread_pool_size=1)
     out = qs.execute(
         QueryIn(
-            datatype="CtrlMean",
+            datatypes=["CtrlMean"],
             select=[
                 Selection(dimension="screen", value="PS-SC-1"),
                 Selection(dimension="Timepoint", value="D4"),

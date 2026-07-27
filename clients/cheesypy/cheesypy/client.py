@@ -161,7 +161,11 @@ class Cheesemonger:
             diagonal: ``(dim_a, dim_b)`` to extract the shared-label diagonal.
             raw: Return the response dict instead of pandas.
         """
-        body: dict[str, Any] = {"datatype": datatype}
+        # The client keeps the convenient str-or-list surface; the server takes
+        # a list ("datatypes"), so normalize here.
+        single = isinstance(datatype, str)
+        datatypes = [datatype] if single else list(datatype)
+        body: dict[str, Any] = {"datatypes": datatypes}
         # In gene_symbols mode, track values we couldn't translate (sent as-is)
         # so we can give a clear hint if the server rejects one as an unknown label.
         untranslated: list[tuple[str, int | str]] = []
@@ -197,8 +201,6 @@ class Cheesemonger:
             return resp
 
         self._relabel_to_symbols(resp)
-        single = isinstance(datatype, str)
-        datatypes = [datatype] if single else list(datatype)
         return response_to_pandas(resp, datatypes, single)
 
     def series(

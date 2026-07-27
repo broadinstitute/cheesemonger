@@ -62,7 +62,7 @@ SafeName = Annotated[str, AfterValidator(sanitize_name)]
 
 class Dimension(BaseModel):
     name: SafeName
-    labels: list[int] | list[str] = Field(max_length=MAX_LABELS_PER_DIMENSION)
+    labels: list[str] = Field(max_length=MAX_LABELS_PER_DIMENSION)
 
 
 class DatatypeSpec(BaseModel):

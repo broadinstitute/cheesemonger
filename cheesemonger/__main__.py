@@ -18,16 +18,28 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 
-from .config import get_settings
+from sqlalchemy.orm import Session
+
+from .config import Settings, get_settings
+from .db import SessionLocal, init_db
 from .services.loader import LoaderError, delete_block, delete_dataset, load_block
 
 
-def _ensure_tables(settings) -> None:
-    """Create DB tables if they don't exist yet (admin commands run standalone)."""
-    from .db import get_engine
-    from .models.base import Base
-    Base.metadata.create_all(bind=get_engine(settings.sqlalchemy_database_url))
+@contextmanager
+def _session(settings: Settings) -> Iterator[Session]:
+    """Open a DB session for one CLI command and close it on the way out.
+
+    Schema creation lives in main() (init_db). The CLI owns the session
+    lifecycle so the loader service can stay pure (it just commits its work).
+    """
+    db = SessionLocal(settings.sqlalchemy_database_url)
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def _parse_chunks(items: list[str]) -> dict[str, int]:
@@ -49,19 +61,20 @@ def _parse_chunks(items: list[str]) -> dict[str, int]:
 def _cmd_load(args: argparse.Namespace) -> None:
     settings = get_settings()
     data_dir = args.data_dir or settings.data_dir
-    _ensure_tables(settings)
 
     try:
-        summary = load_block(
-            source=args.source,
-            dataset=args.dataset,
-            block=args.block,
-            data_dir=data_dir,
-            last_dimension=args.last_dimension,
-            create_dataset=args.create_dataset,
-            overwrite=args.overwrite,
-            chunk_shape=_parse_chunks(args.chunk) or None,
-        )
+        with _session(settings) as db:
+            summary = load_block(
+                source=args.source,
+                dataset=args.dataset,
+                block=args.block,
+                data_dir=data_dir,
+                db=db,
+                last_dimension=args.last_dimension,
+                create_dataset=args.create_dataset,
+                overwrite=args.overwrite,
+                chunk_shape=_parse_chunks(args.chunk) or None,
+            )
     except LoaderError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
@@ -77,10 +90,10 @@ def _cmd_load(args: argparse.Namespace) -> None:
 def _cmd_delete_block(args: argparse.Namespace) -> None:
     settings = get_settings()
     data_dir = args.data_dir or settings.data_dir
-    _ensure_tables(settings)
 
     try:
-        summary = delete_block(args.dataset, args.block, data_dir)
+        with _session(settings) as db:
+            summary = delete_block(args.dataset, args.block, data_dir, db=db)
     except LoaderError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
@@ -91,10 +104,10 @@ def _cmd_delete_block(args: argparse.Namespace) -> None:
 def _cmd_delete_dataset(args: argparse.Namespace) -> None:
     settings = get_settings()
     data_dir = args.data_dir or settings.data_dir
-    _ensure_tables(settings)
 
     try:
-        summary = delete_dataset(args.dataset, data_dir, force=args.force)
+        with _session(settings) as db:
+            summary = delete_dataset(args.dataset, data_dir, db=db, force=args.force)
     except LoaderError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
@@ -107,13 +120,10 @@ def _cmd_delete_dataset(args: argparse.Namespace) -> None:
 
 def _cmd_status(args: argparse.Namespace) -> None:
     settings = get_settings()
-    _ensure_tables(settings)
 
     from .crud import dataset as ds_crud
-    from .db import SessionLocal
 
-    db = SessionLocal(settings.sqlalchemy_database_url)
-    try:
+    with _session(settings) as db:
         if args.dataset:
             ds = ds_crud.get_dataset_by_name(db, args.dataset)
             if ds is None:
@@ -138,8 +148,6 @@ def _cmd_status(args: argparse.Namespace) -> None:
             print(f"    datatypes:      {len(ds.datatypes)}")
             print(f"    blocks ({len(blocks)}): {', '.join(blocks) or '(none)'}")
             print()
-    finally:
-        db.close()
 
 
 def main() -> None:
@@ -216,6 +224,9 @@ def main() -> None:
     if not hasattr(args, "func"):
         parser.print_help()
         sys.exit(1)
+    # Ensure the schema exists once, up front. The composition root owns DB
+    # bootstrap so the loader service never has to.
+    init_db(get_settings().sqlalchemy_database_url)
     args.func(args)
 
 

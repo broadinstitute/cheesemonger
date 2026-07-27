@@ -8,7 +8,7 @@ PESCA_SCHEMA = {
     "name": "pesca",
     "last_dimension": "screen",
     "dimensions": [
-        {"name": "timepoint", "labels": [4, 7]},
+        {"name": "timepoint", "labels": ["4", "7"]},
         {"name": "testedperturbation", "labels": ["103", "226", "672"]},
         {"name": "testedgeneexpression", "labels": ["103", "226", "672", "7157"]},
     ],
