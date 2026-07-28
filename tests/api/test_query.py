@@ -447,3 +447,74 @@ def test_unknown_block_is_404(client, settings, db):
         "select": [{"dimension": "screen", "value": "NOPE"}],
     })
     assert r.status_code == 404, r.text
+
+
+# --- Per-block coordinate labels (the 98-vs-99 fix) ------------------------
+
+
+def _write_block(settings, db, name: str, genes: list[str]) -> None:
+    """Write a block whose testedgeneexpression axis carries `genes` (any subset)."""
+    dims = ["timepoint", "testedperturbation", "testedgeneexpression"]
+    coords = {"timepoint": TP, "testedperturbation": PERT, "testedgeneexpression": genes}
+    zs = np.arange(len(TP) * len(PERT) * len(genes), dtype="float32").reshape(
+        len(TP), len(PERT), len(genes)
+    )
+    blk = xr.Dataset(
+        {
+            "ZScore": xr.DataArray(zs, dims=dims, coords=coords),
+            "L2FC": xr.DataArray(zs, dims=dims, coords=coords),
+            "nCtrlCells": xr.DataArray(
+                np.array([1.0, 2.0], dtype="float32"),
+                dims=["timepoint"], coords={"timepoint": TP},
+            ),
+        }
+    )
+    path = Path(settings.data_dir) / "pesca" / "blocks" / name
+    path.mkdir(parents=True, exist_ok=True)
+    blk.to_zarr(str(path), mode="w")
+    ds_crud.create_block(db, "pesca", name)
+
+
+def test_index_uses_block_coords_not_dataset_labels(client, settings, db):
+    """A block whose gene set differs from the dataset's present-union labels
+    still returns an index matching its OWN data length. This is the fix for the
+    reported '98 columns passed, passed data had 99 columns' crash."""
+    ds_crud.create_dataset(db, DatasetIn(**SCHEMA))  # geneexpression union = 4
+    _write_block(settings, db, "SUB", ["103", "226"])  # this screen has only 2
+    db.commit()
+
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "screen", "value": "SUB"},
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["shape"] == [2]  # the block's 2 genes, not the dataset's 4
+    idx = body["index"]
+    assert [lvl["dimension"] for lvl in idx] == ["testedgeneexpression"]
+    # index labels come from the block, and match the data length exactly
+    assert idx[0]["labels"] == ["103", "226"]
+    assert len(idx[0]["labels"]) == len(body["data"]["ZScore"]) == 2
+
+
+def test_multiblock_ragged_labels_raise_clear_error(client, settings, db):
+    """Two screens with different gene sets can't be stacked in one query yet —
+    the engine raises a clear 422 rather than a raw numpy shape error."""
+    ds_crud.create_dataset(db, DatasetIn(**SCHEMA))
+    _write_block(settings, db, "A", ["103", "226", "672", "7157"])  # 4 genes
+    _write_block(settings, db, "B", ["103", "226"])                 # 2 genes
+    db.commit()
+
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+        ],
+    })
+    assert r.status_code == 422, r.text
+    assert "label sets" in r.json()["detail"].lower()

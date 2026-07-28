@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-from cheesemonger.models.dataset import DatatypeDict, SchemaDict
+from cheesemonger.models.dataset import SchemaDict
 from cheesemonger.schemas.query import (
     AggregateSpec,
     IndexLevel,
@@ -85,18 +85,42 @@ def _aggregate_array(arr: np.ndarray, axis: int, aggregate: AggregateSpec) -> np
     raise QueryError(f"Unknown aggregation type: {t}")
 
 
+# A read returns the values array plus the labels of each free (non-collapsed)
+# dimension, IN ARRAY-AXIS ORDER — captured from the block's OWN Zarr coordinates
+# so the response index always matches the data length, even when this block's
+# label set differs from the dataset-level present union.
+BlockRead = tuple[np.ndarray, "list[tuple[str, list[str]]]"]
+
+
+def _free_coords(da: xr.DataArray, exclude: str | None = None) -> list[tuple[str, list[str]]]:
+    """The labels of each of ``da``'s dims (in axis order), from its coordinates.
+
+    ``exclude`` drops one dim (the aggregated axis). Falls back to integer
+    positions for a dim with no coordinate array.
+    """
+    out: list[tuple[str, list[str]]] = []
+    for d in da.dims:
+        if d == exclude:
+            continue
+        if d in da.coords:
+            labels = [str(v) for v in np.asarray(da.coords[d].values).tolist()]
+        else:
+            labels = [str(i) for i in range(int(da.sizes[d]))]
+        out.append((str(d), labels))
+    return out
+
+
 def _read_datatype_from_ds(
     ds: xr.Dataset,
     datatype: str,
     array_selections: dict[str, str],
     aggregate: AggregateSpec | None,
     diagonal: tuple[str, str] | None,
-) -> np.ndarray:
+) -> BlockRead:
     """Read one datatype from an already-opened xarray Dataset.
 
-    Selects the datatype variable, applies .sel() for label-based indexing,
-    and optionally aggregates. The caller is responsible for opening and
-    closing the Dataset.
+    Returns the values array and the free-dimension coordinate labels (from this
+    block's own coordinates). The caller opens and closes the Dataset.
     """
     if datatype not in ds:
         raise QueryError(f"Datatype '{datatype}' not found in block")
@@ -130,22 +154,27 @@ def _read_datatype_from_ds(
 
     arr = da.values
 
-    if aggregate and aggregate.over in da.dims:
-        agg_axis = list(da.dims).index(aggregate.over)
+    agg_over = aggregate.over if (aggregate and aggregate.over in da.dims) else None
+    if agg_over is not None:
+        assert aggregate is not None  # guaranteed by agg_over is not None
+        agg_axis = list(da.dims).index(agg_over)
         arr = _aggregate_array(arr, agg_axis, aggregate)
 
-    return arr
+    # Index labels come from this block's remaining coordinates (minus the
+    # aggregated axis) — the same artifact that sets the array's length.
+    return arr, _free_coords(da, exclude=agg_over)
 
 
 def _read_diagonal(
     da: xr.DataArray,
     array_selections: dict[str, str],
     diagonal: tuple[str, str],
-) -> np.ndarray:
+) -> BlockRead:
     """Extract diagonal values where two dimensions share coordinate labels.
 
     For each label that exists in both diagonal dimensions, reads the value
-    at [dim_a=label, dim_b=label] (plus any other fixed selections).
+    at [dim_a=label, dim_b=label] (plus any other fixed selections). The index
+    is a single ``label`` level over the shared labels found in THIS block.
     """
     # TODO(perf): Replace the per-label loop with xarray vectorized pointwise
     # selection: da.sel(dim_a=xr.DataArray(common), dim_b=xr.DataArray(common))
@@ -168,7 +197,32 @@ def _read_diagonal(
         val = da.sel({dim_a: label, dim_b: label}).values
         values.append(float(val) if np.ndim(val) == 0 else float(val.flat[0]))
 
-    return np.array(values, dtype=np.float32)
+    return np.array(values, dtype=np.float32), [("label", common)]
+
+
+def _index_from_coords(free_coords: list[tuple[str, list[str]]]) -> list[IndexLevel]:
+    """Turn captured (dim, labels) pairs into response index levels."""
+    return [IndexLevel(dimension=dim, labels=labels) for dim, labels in free_coords]
+
+
+def _stack_blocks(arrays: list[np.ndarray], block_names: list[str]) -> np.ndarray:
+    """Stack per-block arrays on a new leading axis, with a clear error on mismatch.
+
+    Blocks that measured different label sets produce different-shaped arrays,
+    which cannot be stacked. Cross-block queries over ragged screens (union +
+    NaN-fill alignment) are not yet supported — surface that as a QueryError
+    rather than a raw numpy ValueError.
+    """
+    try:
+        return np.stack(arrays)
+    except ValueError as e:
+        raise QueryError(
+            f"Cannot combine blocks {block_names} in one query: their label sets "
+            "differ, so the results have different shapes. Cross-block queries "
+            "over screens with different labels (union + NaN alignment) are not "
+            "yet supported — query a single block, or aggregate over the last "
+            "dimension."
+        ) from e
 
 
 class QueryService:
@@ -226,9 +280,9 @@ class QueryService:
         # Read all blocks in parallel. Each _read_block opens a block's store
         # once and reads every requested datatype from it (shared coordinates,
         # one open). Blocks are dispatched to the thread pool for parallel I/O.
-        all_results: dict[str, dict[str, np.ndarray]] = {}
+        all_results: dict[str, dict[str, BlockRead]] = {}
 
-        def _read_block(block_name: str) -> dict[str, np.ndarray]:
+        def _read_block(block_name: str) -> dict[str, BlockRead]:
             block_path = get_block_path(block_name)
             try:
                 ds = xr.open_zarr(str(block_path))
@@ -257,61 +311,45 @@ class QueryService:
             results = self.executor.map(_read_block, target_blocks)
             all_results = dict(zip(target_blocks, results, strict=True))
 
-        # The datatypes share dimensions (validated in the router), so any one's
-        # spec drives the single shared index.
-        dt_spec = None
-        for dt in schema["datatypes"]:
-            if dt["name"] == query.datatypes[0]:
-                dt_spec = dt
-                break
-
         if agg_over_last_dim:
             assert query.aggregate is not None  # guaranteed by agg_over_last_dim
             return self._aggregate_across_blocks(
-                all_results, target_blocks, query.datatypes, schema,
-                query.aggregate, array_selections, query.diagonal,
-                dt_spec,
+                all_results, target_blocks, query.datatypes, query.aggregate,
             )
 
         if len(target_blocks) == 1:
             return self._single_block_response(
-                all_results, target_blocks, query.datatypes, schema,
-                array_selections, within_block_agg, query,
-                dt_spec,
+                all_results, target_blocks, query.datatypes,
             )
 
         return self._multi_block_response(
-            all_results, target_blocks, query.datatypes, schema,
-            array_selections, within_block_agg, query, last_dim,
-            dt_spec,
+            all_results, target_blocks, query.datatypes, last_dim,
         )
 
     def _aggregate_across_blocks(
         self,
-        all_results: dict[str, dict[str, np.ndarray]],
+        all_results: dict[str, dict[str, BlockRead]],
         target_blocks: list[str],
         datatypes: list[str],
-        schema: SchemaDict,
         aggregate: AggregateSpec,
-        array_selections: dict[str, str],
-        diagonal: tuple[str, str] | None,
-        dt_spec: DatatypeDict | None,
     ) -> QueryOut:
         """Aggregate raw values across blocks.
 
         Collects raw per-block arrays, stacks them along axis 0, then applies the
-        aggregation once — never mean-of-means (or median-of-medians, etc.).
+        aggregation once — never mean-of-means (or median-of-medians, etc.). The
+        index comes from the first block's coordinates (post-selection).
         """
         data: dict[str, list | float | int | None] = {}
         sample_arr = None
         for dt in datatypes:
-            stacked = np.stack([all_results[b][dt] for b in target_blocks])
+            per_block = [all_results[b][dt][0] for b in target_blocks]
+            stacked = _stack_blocks(per_block, target_blocks)
             agg_result = _aggregate_array(stacked, 0, aggregate)
             data[dt] = _numpy_to_json(agg_result)
             if sample_arr is None:
                 sample_arr = agg_result
 
-        index = self._build_index(dt_spec, schema, array_selections, aggregate, diagonal)
+        index = _index_from_coords(all_results[target_blocks[0]][datatypes[0]][1])
         shape = list(sample_arr.shape) if sample_arr is not None and sample_arr.ndim > 0 else []
 
         return QueryOut(
@@ -324,29 +362,22 @@ class QueryService:
 
     def _single_block_response(
         self,
-        all_results: dict[str, dict[str, np.ndarray]],
+        all_results: dict[str, dict[str, BlockRead]],
         target_blocks: list[str],
         datatypes: list[str],
-        schema: SchemaDict,
-        array_selections: dict[str, str],
-        within_block_agg: bool,
-        query: QueryIn,
-        dt_spec: DatatypeDict | None,
     ) -> QueryOut:
         block = target_blocks[0]
         data: dict[str, list | float | int | None] = {}
         sample_arr = None
         for dt in datatypes:
-            arr = all_results[block][dt]
+            arr, _ = all_results[block][dt]
             data[dt] = _numpy_to_json(arr)
             if sample_arr is None:
                 sample_arr = arr
 
-        index = self._build_index(
-            dt_spec, schema, array_selections,
-            query.aggregate if within_block_agg else None,
-            query.diagonal,
-        )
+        # Index labels come from THIS block's coordinates (captured at read), so
+        # index length always matches the data — the per-block-coords fix.
+        index = _index_from_coords(all_results[block][datatypes[0]][1])
         shape = list(sample_arr.shape) if sample_arr is not None and sample_arr.ndim > 0 else []
 
         return QueryOut(
@@ -358,36 +389,30 @@ class QueryService:
 
     def _multi_block_response(
         self,
-        all_results: dict[str, dict[str, np.ndarray]],
+        all_results: dict[str, dict[str, BlockRead]],
         target_blocks: list[str],
         datatypes: list[str],
-        schema: SchemaDict,
-        array_selections: dict[str, str],
-        within_block_agg: bool,
-        query: QueryIn,
         last_dim: str,
-        dt_spec: DatatypeDict | None,
     ) -> QueryOut:
         """Build response for multi-block queries without cross-block aggregation.
 
-        The last_dimension appears in the index as a regular dimension.
-        Data arrays gain an extra leading dimension for blocks.
+        The last_dimension appears in the index as a regular dimension. Data
+        arrays gain an extra leading dimension for blocks. The inner index comes
+        from the first block's coordinates; blocks whose label sets differ can't
+        be stacked and raise a clear error (see _stack_blocks).
         """
         data: dict[str, list | float | int | None] = {}
         sample_arr = None
         for dt in datatypes:
-            stacked = np.stack([all_results[b][dt] for b in target_blocks])
+            per_block = [all_results[b][dt][0] for b in target_blocks]
+            stacked = _stack_blocks(per_block, target_blocks)
             data[dt] = _numpy_to_json(stacked)
             if sample_arr is None:
                 sample_arr = stacked
 
         block_index = IndexLevel(dimension=last_dim, labels=target_blocks)
-        inner_index = self._build_index(
-            dt_spec, schema, array_selections,
-            query.aggregate if within_block_agg else None,
-            query.diagonal,
-        )
-        index = [block_index] + inner_index
+        inner_index = _index_from_coords(all_results[target_blocks[0]][datatypes[0]][1])
+        index = [block_index, *inner_index]
 
         shape = list(sample_arr.shape) if sample_arr is not None else []
 
@@ -397,44 +422,3 @@ class QueryService:
             index=index,
             data=data,
         )
-
-    def _build_index(
-        self,
-        dt_spec: DatatypeDict | None,
-        schema: SchemaDict,
-        array_selections: dict[str, str],
-        aggregate: AggregateSpec | None,
-        diagonal: tuple[str, str] | None,
-    ) -> list[IndexLevel]:
-        """Build the response index (free dimensions and their labels).
-
-        Uses the queried datatype's dimension list — not the full dataset
-        dimensions — so reduced-rank datatypes (e.g. nCtrlCells with only
-        timepoint) get the correct index.
-        """
-        if diagonal:
-            dim_a, dim_b = diagonal
-            labels_a = self._get_dim_labels(schema, dim_a)
-            labels_b = self._get_dim_labels(schema, dim_b)
-            common = sorted({str(lbl) for lbl in labels_a} & {str(lbl) for lbl in labels_b})
-            return [IndexLevel(dimension="label", labels=common)]
-
-        agg_dim = aggregate.over if aggregate else None
-        dt_dims = dt_spec["dimensions"] if dt_spec else [d["name"] for d in schema["dimensions"]]
-
-        index: list[IndexLevel] = []
-        for dim_name in dt_dims:
-            if dim_name in array_selections:
-                continue
-            if dim_name == agg_dim:
-                continue
-            labels = self._get_dim_labels(schema, dim_name)
-            index.append(IndexLevel(dimension=dim_name, labels=labels))
-        return index
-
-    @staticmethod
-    def _get_dim_labels(schema: SchemaDict, dim_name: str) -> list:
-        for d in schema["dimensions"]:
-            if d["name"] == dim_name:
-                return d["labels"]
-        raise QueryError(f"Unknown dimension: {dim_name}")

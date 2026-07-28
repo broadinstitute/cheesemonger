@@ -195,21 +195,19 @@ POST /datasets/perturb-scuba/query
    - `screen=PS-SC-1` matches `last_dimension` → **folder routing**: open `{data_dir}/perturb-scuba/blocks/PS-SC-1`.
    - `Timepoint=D4`, `Target=23293` → **array selection**: `da.sel(...)` on the Zarr.
 4. **Zarr** returns the `Response` vector.
-5. The response **index labels** come from the **SQLite** schema
-   (`dimensions[*].labels`), not from the block's Zarr coordinate arrays.
-
-That last point is the key coupling — and the source of the per-block-coords
-limitation in §10: labels are modeled once at the dataset level, even though each
-block physically has its own coordinate arrays. **This is being changed** — see
-§11: the response index will be built from the block's own Zarr coordinates so it
-always matches the data.
+5. The response **index labels** come from the **block's own Zarr coordinates**
+   (captured during the read), so the index length always matches the data — see
+   §11. (SQLite's `dimensions[*].labels` present union is what
+   `GET /dimensions/{dim}` returns, a *dataset-wide* view — not the per-query
+   index.)
 
 | Question | Answered by |
 |---|---|
 | Does this dataset/block exist? What are its datatypes/dimensions? | SQLite |
 | Which folder holds block X? | derived: `{data_dir}/{dataset}/blocks/{block}` (sanitized) |
 | What are the actual numbers? | Zarr on disk |
-| What labels does the response index use? | SQLite schema (dataset-level) |
+| What labels does the per-query response index use? | the queried block's Zarr coordinates |
+| What labels does `GET /dimensions/{dim}` return? | SQLite present union (across all blocks) |
 
 ---
 
@@ -289,11 +287,11 @@ the DB). A reconcile/cleanup step is a future item (§10).
 
 Tracked in [planning.md](planning.md):
 
-- **Per-block coordinate labels (`TODO(per-block-coords)`).** Labels are modeled
-  once at the dataset level, but blocks legitimately differ (e.g. each screen's
-  `Response` set). The response index uses the dataset-level labels, which can be
-  wrong for a block whose coordinates differ. **Resolution is designed in §11**
-  (gene universe + per-block labels + present union).
+- **Per-block coordinate labels (`TODO(per-block-coords)`) — RESOLVED (§11).**
+  The response index is now built from each block's own Zarr coordinates, and a
+  dataset declares a gene universe for load-time validation. Only multi-block
+  queries over screens with *different* label sets remain unsupported (they raise
+  a clear error pending union + NaN-fill alignment).
 - **Broadcasted form required.** The query engine applies every fixed-dimension
   selection to each datatype, so it needs the "broadcasted" store (every datatype
   spans all selected dims). Reduced-rank datatypes are representable in the model
@@ -309,7 +307,8 @@ Tracked in [planning.md](planning.md):
 
 ## 11. Gene universe & present-union labels
 
-> **Status: load path IMPLEMENTED; query path PENDING.** Resolves the
+> **Status: IMPLEMENTED** — load path + single-block query index; multi-block
+> ragged alignment (union + NaN-fill) is the only remaining piece. Resolves the
 > per-block-coords limitation (§10). Full problem writeup:
 > [per_block_labels_issue.md](per_block_labels_issue.md).
 >
@@ -327,10 +326,13 @@ Tracked in [planning.md](planning.md):
 > - `GET /datasets/{dataset}/dimensions/{dim}` already reads
 >   `dimensions[*].labels`, so it now returns the present union with no change.
 >
-> **Pending (query path):** build the query response `index` from the *block's
-> own Zarr coordinates* (not the dataset labels), and align multi-block queries
-> to the union with NaN-fill. Until this lands, the single-block query index is
-> still sourced from the dataset labels.
+> **Implemented (query path):** the response `index` is built from each block's
+> *own Zarr coordinates* (captured at read in `query._free_coords`), so index
+> length always matches the data — the fix for the reported crash.
+>
+> **Pending:** multi-block queries over screens with *different* label sets
+> (union + NaN-fill alignment). These currently raise a clear error
+> (`query._stack_blocks`) instead of stacking mismatched shapes.
 >
 > **Design note — no per-block `labels` column.** Rather than persist each
 > block's labels, the present union is maintained at the dataset level and
