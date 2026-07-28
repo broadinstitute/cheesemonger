@@ -1,7 +1,7 @@
 """Sanitized on-disk path helpers for dataset block directories.
 
 Metadata (dimensions, datatypes, blocks) now lives in SQLite via the crud
-layer. This module only builds the Zarr block directory paths — and it is the
+layer. This module only builds the Zarr block directory paths, and it is the
 single place that does so, routing every dataset/block name through
 ``sanitize_name`` so no request can escape ``data_dir`` via ``..`` or ``/``.
 The API layer stores metadata in SQLite (which is safe from path traversal),

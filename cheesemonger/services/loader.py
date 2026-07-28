@@ -12,10 +12,12 @@ query engine handles this: a selection on a dim a datatype lacks is ignored for
 that datatype rather than erroring (see services/query.py). No broadcast-on-load
 is needed.
 
-TODO(per-block-coords): schema dimension labels are dataset-level, but blocks
-(screens) legitimately differ in their Target/Response label sets. Revisit how
-per-block coordinate labels feed the query response index for multi-screen
-datasets.
+Per-block coordinate labels: a dataset declares a *gene_universe* (the validation
+superset for gene dimensions); every block's labels must be a subset of it. The
+dataset's ``dimensions[*].labels`` is the *present union* — the labels actually
+loaded across blocks — maintained here at load (fold-in on add) and recomputed
+on delete. The query engine builds its index from each block's own Zarr
+coordinates, so the index always matches the data.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from cheesemonger.models.dataset import SchemaDict
 from cheesemonger.schemas.common import ChunkDim, DatatypeSpec, Dimension, normalize_name
 from cheesemonger.schemas.dataset import DatasetIn
 from cheesemonger.services import dataset as ds_paths
+from cheesemonger.services.gene_universe import normalize_label
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +63,14 @@ def _infer_schema(
     name: str,
     last_dimension: str,
     chunk_shape: dict[str, int] | None = None,
+    gene_universe: dict[str, list[str]] | None = None,
 ) -> DatasetIn:
     """Build a DatasetIn schema from a source store's dims and data variables.
 
     ``chunk_shape`` (dim -> chunk size) is recorded so every block of the dataset
     is chunked the same way. Entries for dims not in the source are dropped.
+    ``gene_universe`` (dim -> allowed labels) is the validation superset stored on the
+    dataset; a block's labels along a listed dim must be a subset of it.
     """
     if last_dimension in src.sizes:
         raise LoaderError(
@@ -92,6 +98,7 @@ def _infer_schema(
             dimensions=dimensions,
             datatypes=datatypes,
             chunk_shape=chunks,
+            gene_universe=gene_universe or {},
         )
     except Exception as e:
         raise LoaderError(f"Inferred schema is invalid: {e}") from e
@@ -119,6 +126,85 @@ def _validate_against_schema(
                 f"Source datatype {v!r} is not declared in dataset {dataset!r} "
                 f"(declared: {sorted(schema_dts)})."
             )
+
+
+def _validate_against_gene_universe(
+    src: xr.Dataset, gene_universe: dict[str, list[str]], dataset: str
+) -> None:
+    """Ensure each block coordinate is a subset of the dataset's gene_universe.
+
+    Only dims present in ``gene_universe`` are checked (gene dims); other dims (e.g.
+    Timepoint) are unconstrained. A block that lacks a listed dim entirely
+    (reduced-rank) is fine — there is nothing to validate. Labels are normalized
+    the same way as the gene_universe so the comparison is apples-to-apples.
+    """
+    for dim, allowed in gene_universe.items():
+        if dim not in src.sizes:
+            continue  # block doesn't carry this dim — nothing to check
+        allowed_set = {normalize_label(a) or str(a) for a in allowed}
+        missing = [lbl for lbl in _coord_labels(src, dim) if lbl not in allowed_set]
+        if missing:
+            preview = ", ".join(missing[:10])
+            more = "" if len(missing) <= 10 else f" (+{len(missing) - 10} more)"
+            raise LoaderError(
+                f"Block has {len(missing)} label(s) in dimension {dim!r} that are "
+                f"not in dataset {dataset!r}'s gene_universe: {preview}{more}"
+            )
+
+
+def _block_labels_by_dim(src: xr.Dataset) -> dict[str, list[str]]:
+    """The block's coordinate labels for every dimension it carries."""
+    return {str(d): _coord_labels(src, str(d)) for d in src.sizes}
+
+
+def _recompute_present_union(db: Session, dataset: str, data_dir: str) -> None:
+    """Recompute the present union for every dim from the blocks on disk.
+
+    Used after a removal/overwrite, where the union may *shrink* and so cannot be
+    maintained incrementally. Reads each remaining block's coordinate vectors (a
+    small per-dim array, not the data variables) and unions them, preserving
+    first-seen order across blocks (sorted block order, for determinism). Flushes
+    but does not commit — the caller owns the transaction.
+    """
+    schema = ds_crud.get_schema_dict(db, dataset)
+    if schema is None:
+        return
+    dim_names = [d["name"] for d in schema["dimensions"]]
+    seen: dict[str, set[str]] = {d: set() for d in dim_names}
+    union: dict[str, list[str]] = {d: [] for d in dim_names}
+    for block in ds_crud.list_block_names(db, dataset):
+        path = ds_paths.block_dir(data_dir, dataset, block)
+        if not path.exists():
+            continue
+        bsrc = xr.open_zarr(str(path))
+        try:
+            for dim in dim_names:
+                if dim not in bsrc.sizes:
+                    continue
+                for lbl in _coord_labels(bsrc, dim):
+                    if lbl not in seen[dim]:
+                        seen[dim].add(lbl)
+                        union[dim].append(lbl)
+        finally:
+            bsrc.close()
+    ds_crud.set_present_labels(db, dataset, union)
+
+
+def reconcile_dataset(dataset: str, data_dir: str, *, db: Session) -> dict:
+    """Rebuild the present union from the blocks on disk (the source of truth).
+
+    The present union is a cache derived from the blocks, so it can always be
+    regenerated. Use after an out-of-band change, an interrupted load, or if the
+    union ever drifts. The caller owns the session; this commits its work.
+    """
+    if not ds_crud.dataset_exists(db, dataset):
+        raise LoaderError(f"Dataset {dataset!r} does not exist")
+    _recompute_present_union(db, dataset, data_dir)
+    db.commit()
+    schema = ds_crud.get_schema_dict(db, dataset)
+    dims = {d["name"]: len(d["labels"]) for d in (schema["dimensions"] if schema else [])}
+    logger.info("Reconciled present union for %r: %s", dataset, dims)
+    return {"dataset": dataset, "reconciled": True, "dimensions": dims}
 
 
 # Default per-chunk target when no chunk_shape is declared. Far below dask's
@@ -212,6 +298,7 @@ def load_block(
     create_dataset: bool = False,
     overwrite: bool = False,
     chunk_shape: dict[str, int] | None = None,
+    gene_universe: dict[str, list[str]] | None = None,
 ) -> dict:
     """Load a Zarr store as a block of ``dataset``.
 
@@ -245,11 +332,15 @@ def load_block(
         existing_schema = ds_crud.get_schema_dict(db, dataset)
         if existing_schema is not None:
             _validate_against_schema(src, existing_schema, dataset, last_dimension)
+            resolved_gene_universe = existing_schema.get("gene_universe") or {}
             # Reuse the dataset's stored chunking so all blocks match.
             resolved_chunks = {c["name"]: c["size"] for c in existing_schema["chunk_shape"]}
         elif create_dataset:
-            dataset_in = _infer_schema(src, dataset, last_dimension, chunk_shape=chunk_shape)
+            dataset_in = _infer_schema(
+                src, dataset, last_dimension, chunk_shape=chunk_shape, gene_universe=gene_universe
+            )
             ds_crud.create_dataset(db, dataset_in)
+            resolved_gene_universe = dataset_in.gene_universe
             resolved_chunks = {c.name: c.size for c in dataset_in.chunk_shape}
             logger.info(
                 "Created dataset %r (last_dimension=%r, %d dims, %d datatypes)",
@@ -261,6 +352,10 @@ def load_block(
                 f"Dataset {dataset!r} does not exist. Pass create_dataset=True to "
                 f"infer its schema from the source store."
             )
+
+        # Validate the block's labels against the gene_universe BEFORE writing to
+        # disk — fail fast rather than leaving an out-of-gene_universe block behind.
+        _validate_against_gene_universe(src, resolved_gene_universe, dataset)
 
         dest = ds_paths.block_dir(data_dir, dataset, block)
         if dest.exists():
@@ -287,9 +382,14 @@ def load_block(
         )
         _write_dataset(src, str(dest), resolved_chunks)
 
-        # Register the block in the DB
+        # Register the block in the DB and fold its labels into the present
+        # union (an add only grows the union — see crud.union_present_labels).
+        # An overwrite may shrink it, so recompute from all blocks instead.
         if not ds_crud.block_exists(db, dataset, block):
             ds_crud.create_block(db, dataset, block)
+            ds_crud.union_present_labels(db, dataset, _block_labels_by_dim(src))
+        else:
+            _recompute_present_union(db, dataset, data_dir)
         db.commit()
 
         summary = {
@@ -328,6 +428,9 @@ def delete_block(
     block_path = ds_paths.block_dir(data_dir, dataset, block)
     if block_path.exists():
         shutil.rmtree(block_path)
+    # A removal may shrink the present union (genes only this block had), so
+    # recompute it from the blocks that remain.
+    _recompute_present_union(db, dataset, data_dir)
     db.commit()
 
     logger.info("Deleted block %r from dataset %r", block, dataset)

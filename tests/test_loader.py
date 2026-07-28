@@ -241,7 +241,7 @@ def test_block_name_dot_is_normalized(tmp_path, loader_db):
 
 def test_default_chunking_handles_object_dtype(tmp_path, loader_db):
     """Default (auto) chunking must not crash on object/string variables like
-    the correlates store's CorrelateTarget — dask can't byte-size those."""
+    the correlates store's CorrelateTarget, dask can't byte-size those."""
     dims = ["Timepoint", "Target", "Rank"]
     coords = {"Timepoint": TP, "Target": ["1", "2"], "Rank": [1, 2, 3]}
     ds = xr.Dataset(
@@ -390,3 +390,111 @@ def test_delete_missing_dataset_errors(tmp_path, loader_db):
     data_dir = str(tmp_path / "data")
     with pytest.raises(LoaderError, match="does not exist"):
         delete_dataset("nope", data_dir, db=loader_db)
+
+
+# --- Gene gene_universe & present-union maintenance -----------------------------
+
+from cheesemonger.services.loader import reconcile_dataset  # noqa: E402
+from cheesemonger.services.gene_universe import build_gene_universe  # noqa: E402
+
+
+def _store_with_targets(tmp_path, name, targets):
+    """Like _source_store but with a custom Target label set (one datatype)."""
+    dims = ["Timepoint", "Target", "Response"]
+    coords = {"Timepoint": TP, "Target": list(targets), "Response": RESPONSE}
+    shape = (len(TP), len(targets), len(RESPONSE))
+    rng = np.random.default_rng(0)
+    ds = xr.Dataset(
+        {"ZScore": xr.DataArray(rng.standard_normal(shape).astype("float32"),
+                                dims=dims, coords=coords)}
+    )
+    path = tmp_path / "src" / name
+    ds.to_zarr(path, mode="w")
+    return str(path)
+
+
+def _target_labels(db, dataset):
+    schema = ds_crud.get_schema_dict(db, dataset)
+    return next(d for d in schema["dimensions"] if d["name"] == "Target")["labels"]
+
+
+def test_build_gene_universe_from_manifest_with_extras(tmp_path):
+    manifest = tmp_path / "gene_universe.txt"
+    manifest.write_text("23293\n55149\n9992\n")
+    labels = build_gene_universe(manifest_path=str(manifest), extras=["Cas9", "9992"])
+    # dedup, first-seen order; extras appended; "9992" not duplicated
+    assert labels == ["23293", "55149", "9992", "Cas9"]
+
+
+def test_load_stores_gene_universe_and_accepts_subset(tmp_path, loader_db):
+    data_dir = str(tmp_path / "data")
+    gene_universe = {"Target": ["23293", "55149", "99999"]}  # superset of the block
+    source = _source_store(tmp_path)  # Target = ["23293", "55149"]
+    load_block(source, "ds", "B1", data_dir, db=loader_db,
+               last_dimension="screen", create_dataset=True, gene_universe=gene_universe)
+    schema = ds_crud.get_schema_dict(loader_db, "ds")
+    assert schema["gene_universe"]["Target"] == ["23293", "55149", "99999"]
+
+
+def test_load_rejects_label_outside_gene_universe(tmp_path, loader_db):
+    data_dir = str(tmp_path / "data")
+    gene_universe = {"Target": ["23293"]}  # missing 55149
+    source = _source_store(tmp_path)
+    with pytest.raises(LoaderError, match="not in dataset"):
+        load_block(source, "ds", "B1", data_dir, db=loader_db,
+                   last_dimension="screen", create_dataset=True, gene_universe=gene_universe)
+    # Nothing should have been written for the rejected block.
+    assert not (Path(data_dir) / "ds" / "blocks" / "B1").exists()
+
+
+def test_present_union_grows_across_blocks(tmp_path, loader_db):
+    data_dir = str(tmp_path / "data")
+    gene_universe = {"Target": ["A", "B", "C", "D"]}
+    s1 = _store_with_targets(tmp_path, "s1.zarr", ["A", "B"])
+    s2 = _store_with_targets(tmp_path, "s2.zarr", ["B", "C", "D"])
+    load_block(s1, "ds", "B1", data_dir, db=loader_db,
+               last_dimension="screen", create_dataset=True, gene_universe=gene_universe)
+    assert _target_labels(loader_db, "ds") == ["A", "B"]
+    load_block(s2, "ds", "B2", data_dir, db=loader_db, last_dimension="screen")
+    # union of both blocks, first-seen order preserved
+    assert _target_labels(loader_db, "ds") == ["A", "B", "C", "D"]
+
+
+def test_present_union_shrinks_on_delete(tmp_path, loader_db):
+    data_dir = str(tmp_path / "data")
+    gene_universe = {"Target": ["A", "B", "C", "D"]}
+    s1 = _store_with_targets(tmp_path, "s1.zarr", ["A", "B"])
+    s2 = _store_with_targets(tmp_path, "s2.zarr", ["C", "D"])
+    load_block(s1, "ds", "B1", data_dir, db=loader_db,
+               last_dimension="screen", create_dataset=True, gene_universe=gene_universe)
+    load_block(s2, "ds", "B2", data_dir, db=loader_db, last_dimension="screen")
+    assert _target_labels(loader_db, "ds") == ["A", "B", "C", "D"]
+    delete_block("ds", "B2", data_dir, db=loader_db)
+    # C and D existed only in B2 → gone from the present union
+    assert _target_labels(loader_db, "ds") == ["A", "B"]
+
+
+def test_overwrite_recomputes_union(tmp_path, loader_db):
+    data_dir = str(tmp_path / "data")
+    gene_universe = {"Target": ["A", "B", "C"]}
+    s1 = _store_with_targets(tmp_path, "s1.zarr", ["A", "B"])
+    load_block(s1, "ds", "B1", data_dir, db=loader_db,
+               last_dimension="screen", create_dataset=True, gene_universe=gene_universe)
+    s1b = _store_with_targets(tmp_path, "s1b.zarr", ["C"])
+    load_block(s1b, "ds", "B1", data_dir, db=loader_db,
+               last_dimension="screen", overwrite=True)
+    # the only block was replaced → union reflects the new labels only
+    assert _target_labels(loader_db, "ds") == ["C"]
+
+
+def test_reconcile_rebuilds_union_from_disk(tmp_path, loader_db):
+    data_dir = str(tmp_path / "data")
+    s1 = _store_with_targets(tmp_path, "s1.zarr", ["A", "B"])
+    load_block(s1, "ds", "B1", data_dir, db=loader_db,
+               last_dimension="screen", create_dataset=True)
+    # Corrupt the cached union, then rebuild it from the blocks on disk.
+    ds_crud.set_present_labels(loader_db, "ds", {"Target": ["WRONG"]})
+    loader_db.commit()
+    summary = reconcile_dataset("ds", data_dir, db=loader_db)
+    assert summary["dataset"] == "ds"
+    assert _target_labels(loader_db, "ds") == ["A", "B"]

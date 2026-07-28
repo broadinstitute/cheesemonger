@@ -12,7 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # Settings come from environment variables, falling back to a local .env
-    # file if present (handy for development — e.g. DATA_DIR=./data). Explicit
+    # file if present (handy for development (e.g. DATA_DIR=./data). Explicit
     # kwargs and real env vars take precedence over .env.
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

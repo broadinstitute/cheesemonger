@@ -8,7 +8,7 @@ Usage:
     python -m cheesemonger status
 
 All data mutations (create/load/delete of datasets and blocks) happen here, not
-over HTTP — the REST API is read-only. Source data is written by
+over HTTP, the REST API is read-only. Source data is written by
 xarray.Dataset.to_zarr() and contains both data variables and coordinate
 arrays. These are infrequent admin operations, not user-facing requests.
 """
@@ -25,7 +25,13 @@ from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
 from .db import SessionLocal, init_db
-from .services.loader import LoaderError, delete_block, delete_dataset, load_block
+from .services.loader import (
+    LoaderError,
+    delete_block,
+    delete_dataset,
+    load_block,
+    reconcile_dataset,
+)
 
 
 @contextmanager
@@ -58,9 +64,47 @@ def _parse_chunks(items: list[str]) -> dict[str, int]:
     return chunks
 
 
+def _build_gene_universe_arg(args: argparse.Namespace) -> dict[str, list[str]] | None:
+    """Build the {gene_dim: labels} gene-universe mapping from the CLI flags.
+
+    Requires --gene-dim (which dims to validate) together with a source
+    (--gene-universe-taiga-id or --gene-universe-manifest). The same label list
+    is applied to every listed gene dimension.
+    """
+    gene_dims = args.gene_dim or []
+    has_source = bool(args.gene_universe_taiga_id or args.gene_universe_manifest)
+    if not gene_dims and not has_source:
+        return None
+    if gene_dims and not has_source:
+        print(
+            "ERROR: --gene-dim requires a gene-universe source "
+            "(--gene-universe-taiga-id or --gene-universe-manifest).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if has_source and not gene_dims:
+        print(
+            "ERROR: a gene-universe source was given but no --gene-dim to apply it to.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    from .services.gene_universe import build_gene_universe
+
+    labels = build_gene_universe(
+        taiga_id=args.gene_universe_taiga_id or "",
+        manifest_path=args.gene_universe_manifest or "",
+        extras=args.gene_universe_extra or [],
+        token_path=get_settings().taiga_token_path,
+    )
+    print(f"Gene universe: {len(labels)} label(s) applied to dims {gene_dims}")
+    return {dim: labels for dim in gene_dims}
+
+
 def _cmd_load(args: argparse.Namespace) -> None:
     settings = get_settings()
     data_dir = args.data_dir or settings.data_dir
+    gene_universe = _build_gene_universe_arg(args)
 
     try:
         with _session(settings) as db:
@@ -74,6 +118,7 @@ def _cmd_load(args: argparse.Namespace) -> None:
                 create_dataset=args.create_dataset,
                 overwrite=args.overwrite,
                 chunk_shape=_parse_chunks(args.chunk) or None,
+                gene_universe=gene_universe,
             )
     except LoaderError as e:
         print(f"ERROR: {e}", file=sys.stderr)
@@ -116,6 +161,21 @@ def _cmd_delete_dataset(args: argparse.Namespace) -> None:
         f"Deleted dataset '{summary['dataset']}' "
         f"({summary['blocks_deleted']} block(s) removed)"
     )
+
+
+def _cmd_reconcile(args: argparse.Namespace) -> None:
+    settings = get_settings()
+    data_dir = args.data_dir or settings.data_dir
+
+    try:
+        with _session(settings) as db:
+            summary = reconcile_dataset(args.dataset, data_dir, db=db)
+    except LoaderError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    dims = ", ".join(f"{name}({n})" for name, n in summary["dimensions"].items())
+    print(f"Reconciled present union for '{summary['dataset']}': {dims}")
 
 
 def _cmd_status(args: argparse.Namespace) -> None:
@@ -185,6 +245,27 @@ def main() -> None:
              "Set when creating the dataset. E.g. for series-heavy access: "
              "--chunk Target=1 --chunk Timepoint=1 (leaves Response whole).",
     )
+    load_parser.add_argument(
+        "--gene-dim", action="append", default=[], metavar="DIM",
+        help="Dimension to validate against the gene universe (repeatable), e.g. "
+             "--gene-dim Target --gene-dim Response. Requires a gene-universe source.",
+    )
+    load_parser.add_argument(
+        "--gene-universe-taiga-id", default=None, metavar="TAIGA_ID",
+        help="Taiga dataset id of an HGNC gene table; its entrez_id column "
+             "(normalized to strings) becomes the gene universe. "
+             "E.g. hgnc-gene-table-e250.4",
+    )
+    load_parser.add_argument(
+        "--gene-universe-manifest", default=None, metavar="PATH",
+        help="Local file of gene-universe labels (one per line, or a JSON list). "
+             "Alternative to --gene-universe-taiga-id (for tests/air-gapped loads).",
+    )
+    load_parser.add_argument(
+        "--gene-universe-extra", action="append", default=[], metavar="LABEL",
+        help="Extra non-entrez token to add to the gene universe (repeatable), "
+             "e.g. --gene-universe-extra Cas9.",
+    )
     load_parser.set_defaults(func=_cmd_load)
 
     del_block_parser = subparsers.add_parser(
@@ -219,6 +300,17 @@ def main() -> None:
         "--dataset", default=None, help="Show only this dataset (default: all)"
     )
     status_parser.set_defaults(func=_cmd_status)
+
+    reconcile_parser = subparsers.add_parser(
+        "reconcile",
+        help="Rebuild a dataset's present-union labels from the blocks on disk",
+    )
+    reconcile_parser.add_argument("--dataset", required=True, help="Dataset name")
+    reconcile_parser.add_argument(
+        "--data-dir", default=None,
+        help="Data root (default: DATA_DIR from settings/.env)",
+    )
+    reconcile_parser.set_defaults(func=_cmd_reconcile)
 
     args = parser.parse_args()
     if not hasattr(args, "func"):

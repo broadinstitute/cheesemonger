@@ -4,7 +4,7 @@
 #   us.gcr.io/cds-docker-containers/cheesemonger
 #
 # Runtime config is via env vars (see config.py); data lives on a mounted
-# volume (DATA_DIR, default /mnt/data) — nothing is baked into the image.
+# volume (DATA_DIR, default /mnt/data), nothing is baked into the image.
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 

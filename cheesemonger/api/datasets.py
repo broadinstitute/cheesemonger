@@ -18,7 +18,7 @@ from cheesemonger.schemas.dataset import (
 )
 
 # Read-only router. Datasets and blocks are created/deleted exclusively through
-# the CLI loader (`python -m cheesemonger ...`), not over HTTP — see
+# the CLI loader (`python -m cheesemonger ...`), not over HTTP, see
 # services/loader.py. The API only reads.
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 

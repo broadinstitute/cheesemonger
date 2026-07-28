@@ -97,6 +97,33 @@ billion measurements) lives in Zarr stores on disk.
 **Default location:** `sqlite:///./cheesemonger.db` (configurable via
 `SQLALCHEMY_DATABASE_URL` environment variable).
 
+### Gene universe & present-union labels
+
+> **Status: load path IMPLEMENTED; query path PENDING.** Full design:
+> [data_model.md §11](data_model.md#11-gene-universe--present-union-labels)
+> and [per_block_labels_issue.md](per_block_labels_issue.md).
+
+To fix a class of bugs where screens carry different gene sets than the frozen
+dataset labels:
+
+- **`dataset`** gained a **`gene_universe`** JSON column (`{gene_dim: [labels]}`) — the
+  validation superset, the entrez IDs from a pinned Taiga HGNC table
+  (`hgnc-gene-table-e250.4`) plus the non-entrez token `Cas9`. At each load a
+  block's labels along a universe dim must be a subset, else the load fails.
+- The dataset's **`dimensions[].labels` is now the present union** of loaded
+  blocks (maintained at load: fold-in on add, recompute on delete/overwrite),
+  not a list frozen from the first block. `GET /datasets/{dataset}/dimensions/{dim}`
+  therefore returns "what exists" — never the universe.
+- Per-block labels are **not** persisted; the present union is recomputed from the
+  blocks' Zarr coordinates on removal, and a `reconcile` CLI command rebuilds it.
+- **All coordinate labels are strings** (entrez IDs like `"9992"`, plus tokens like
+  `Cas9`).
+
+**Still pending (query path):** the query `index` is not yet built from the block's
+own Zarr coordinates, and cross-block queries do not yet align to the union with
+NaN-fill. Until that lands the single-block index is still sourced from the
+dataset labels.
+
 ---
 
 ## Types
@@ -258,6 +285,45 @@ Notes:
 
 ---
 
+### `GET /datasets/{dataset}/dimensions/{dim}`
+
+Full coordinate labels for a single dimension, with paging — unlike
+`GET /datasets/{dataset}`, which truncates large label lists to a sample. Pass the
+`last_dimension` name (e.g. `screen`) to list the loaded blocks instead.
+
+**Query parameters**
+
+| Param | Type | Default | Notes |
+|-------|------|---------|-------|
+| `offset` | int ≥ 0 | `0` | paging start index |
+| `limit` | int > 0 | *(none)* | max labels returned; omit for all |
+
+**Response** `200 OK`
+
+```json
+{
+  "name": "testedgeneexpression",
+  "size": 18000,
+  "labels": ["103", "226", "672", "..."]
+}
+```
+
+- `size` is the **total** count (before paging); `labels` is the `offset`/`limit` slice.
+
+**Error cases**
+
+| Status | Condition |
+|--------|-----------|
+| `404 Not Found` | dataset does not exist, or `dim` is not a dimension of it |
+
+> **Present union (implemented, see [Gene universe & present-union labels](#gene-universe--present-union-labels)):**
+> this returns the dataset's `dimensions[*].labels`, which are now the **present
+> union** — every label actually present across the dataset's loaded blocks, so it
+> reflects *what exists*. It is **not** the (larger) validation universe. The union
+> is maintained at load and can be rebuilt with the `reconcile` CLI command.
+
+---
+
 ### Data mutations (CLI)
 
 All writes — creating a dataset, loading a block, deleting a block, deleting a
@@ -286,7 +352,16 @@ python -m cheesemonger delete-dataset --dataset perturb-scuba --force
 | `delete-block` | `--dataset`, `--block` | Errors if the dataset or block doesn't exist |
 | `delete-dataset` | `--dataset`, `--force` | Without `--force`, refuses when blocks remain; with it, deletes all blocks first |
 
-All three accept `--data-dir` (defaults to `DATA_DIR` from settings/`.env`).
+All accept `--data-dir` (defaults to `DATA_DIR` from settings/`.env`).
+
+> **Gene universe (implemented).** `load` accepts an explicit gene **universe** on
+> `--create-dataset`: `--gene-dim DIM` (repeatable) plus a source —
+> `--gene-universe-taiga-id hgnc-gene-table-e250.4` (uses the `entrez_id` column) or
+> `--gene-universe-manifest PATH` — plus `--gene-universe-extra Cas9`. Every subsequent
+> `load` validates the block's labels along each gene dim are a subset of the
+> stored universe. A `reconcile --dataset NAME` command rebuilds the present-union
+> labels from the blocks on disk (the union's safety net). See
+> [Gene universe & present-union labels](#gene-universe--present-union-labels).
 
 ---
 

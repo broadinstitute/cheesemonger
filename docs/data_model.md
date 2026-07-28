@@ -19,6 +19,7 @@ Companion docs: [codebase_guide.md](codebase_guide.md) (code structure),
 8. [Worked example: perturb-scuba / PS-SC-1](#8-worked-example-perturb-scuba--ps-sc-1)
 9. [Lifecycle & consistency](#9-lifecycle--consistency)
 10. [Known limitations](#10-known-limitations)
+11. [Planned changes: gene universe & per-block labels](#11-planned-changes-gene-universe--per-block-labels)
 
 ---
 
@@ -72,9 +73,10 @@ erDiagram
         string   id PK
         string   name UK "unique, indexed"
         string   last_dimension
-        json     dimensions "list of {name, labels}"
+        json     dimensions "list of {name, labels}; labels = present union"
         json     datatypes  "list of {name, dimensions, dtype}"
         json     chunk_shape "list of {name, size}"
+        json     gene_universe "gene-dim -> allowed labels (validation superset)"
         datetime created_at
     }
     BLOCK {
@@ -92,9 +94,10 @@ erDiagram
 | `id` | str (UUID) | primary key |
 | `name` | str | **unique**, indexed — the dataset name |
 | `last_dimension` | str | the organizational-key name (e.g. `screen`) |
-| `dimensions` | JSON | list of `{name, labels}` (see §4) |
+| `dimensions` | JSON | list of `{name, labels}` — `labels` is the **present union** across loaded blocks (§11) |
 | `datatypes` | JSON | list of `{name, dimensions, dtype}` |
 | `chunk_shape` | JSON | list of `{name, size}` (may be empty) |
+| `gene_universe` | JSON | `{gene_dim: [labels]}` — validation superset; blocks must be a subset (§11) |
 | `created_at` | datetime (tz-aware) | set on insert |
 
 **`block`**
@@ -197,7 +200,9 @@ POST /datasets/perturb-scuba/query
 
 That last point is the key coupling — and the source of the per-block-coords
 limitation in §10: labels are modeled once at the dataset level, even though each
-block physically has its own coordinate arrays.
+block physically has its own coordinate arrays. **This is being changed** — see
+§11: the response index will be built from the block's own Zarr coordinates so it
+always matches the data.
 
 | Question | Answered by |
 |---|---|
@@ -218,7 +223,7 @@ Enforced at dataset creation (`api/datasets.py`) and by the schema types:
 - **No dimension may have empty `labels`.**
 - **Uniqueness** — dataset `name` is globally unique; block `name` is unique per dataset.
 - **Size caps** — ≤ 20 dimensions, ≤ 50,000 labels/dimension, ≤ 100 datatypes.
-- **Not enforced (by design):** per-block label agreement. Different blocks may carry different `Target`/`Response` label sets; the loader validates dimension/datatype *names* against the schema but not labels.
+- **Block gene labels ⊆ universe** (implemented, §11). For each dimension present in `dataset.gene_universe`, a block's coordinate labels along that dim must be a subset of the universe, else the load fails with a clear error. Blocks may still carry *different* label sets from one another (that is the point) — they just each have to fall within the shared universe. Dims absent from the universe (e.g. `Timepoint`) are not label-validated.
 
 ---
 
@@ -287,7 +292,8 @@ Tracked in [planning.md](planning.md):
 - **Per-block coordinate labels (`TODO(per-block-coords)`).** Labels are modeled
   once at the dataset level, but blocks legitimately differ (e.g. each screen's
   `Response` set). The response index uses the dataset-level labels, which can be
-  wrong for a block whose coordinates differ.
+  wrong for a block whose coordinates differ. **Resolution is designed in §11**
+  (gene universe + per-block labels + present union).
 - **Broadcasted form required.** The query engine applies every fixed-dimension
   selection to each datatype, so it needs the "broadcasted" store (every datatype
   spans all selected dims). Reduced-rank datatypes are representable in the model
@@ -298,3 +304,117 @@ Tracked in [planning.md](planning.md):
   chunk shape.
 - **Orphaned directories.** No reconcile step yet for data-on-disk-without-a-row
   (see §9).
+
+---
+
+## 11. Gene universe & present-union labels
+
+> **Status: load path IMPLEMENTED; query path PENDING.** Resolves the
+> per-block-coords limitation (§10). Full problem writeup:
+> [per_block_labels_issue.md](per_block_labels_issue.md).
+>
+> **Implemented (load path):**
+> - `dataset.gene_universe` column ({dim: [labels]}) — the validation superset.
+> - Load-time validation: a block's labels along a universe dim must be a
+>   subset, else the load fails (`loader._validate_against_universe`).
+> - `dataset.dimensions[*].labels` is maintained as the **present union**:
+>   fold-in on add (`crud.union_present_labels`), recompute-from-disk on
+>   delete/overwrite (`loader._recompute_present_union`).
+> - `reconcile` CLI command rebuilds the present union from the blocks on disk
+>   (`loader.reconcile_dataset`) — the cache's safety net.
+> - Universe sourced from Taiga (`hgnc-gene-table-e250.4` `entrez_id` column) or
+>   a manifest, plus extra tokens like `Cas9` (`services/universe.py`).
+> - `GET /datasets/{dataset}/dimensions/{dim}` already reads
+>   `dimensions[*].labels`, so it now returns the present union with no change.
+>
+> **Pending (query path):** build the query response `index` from the *block's
+> own Zarr coordinates* (not the dataset labels), and align multi-block queries
+> to the union with NaN-fill. Until this lands, the single-block query index is
+> still sourced from the dataset labels.
+>
+> **Design note — no per-block `labels` column.** Rather than persist each
+> block's labels, the present union is maintained at the dataset level and
+> recomputed from the blocks' Zarr coordinates on the (rare) delete/overwrite.
+> This keeps the `block` table lean; the trade is that a removal reads the
+> remaining blocks' coordinate arrays from disk. See the "Per-block labels" row
+> below for the alternative that was considered.
+
+### Why
+
+Today a dimension's `labels` are frozen from the *first* block loaded (§6), but
+screens legitimately measure different gene sets. That produces two bugs:
+
+1. **Query mismatch** — the response `index` (from the frozen dataset labels) and
+   `data` (from the block's Zarr) can have different lengths, crashing the client
+   (`pandas`: "N columns passed, passed data had M columns").
+2. **Stale `dimension_labels`** — `GET /datasets/{dataset}/dimensions/{dim}`
+   returns only the first block's genes, silently omitting genes other screens
+   added.
+
+**Guiding principle:** the query `index` must come from the *same artifact that
+sets the data length* — the block's Zarr coordinate — so index and data can never
+disagree. Any other source (a frozen dataset column) is a claim that can drift.
+
+### The model: three lists, three jobs
+
+| List | Scope | Source | Purpose |
+|---|---|---|---|
+| **Universe** | dataset (gene dims) | pinned Taiga HGNC table (`hgnc-gene-table-e250.4`, the `entrez_id` column) **+ `Cas9`** | **load-time validation only** (`block ⊆ universe`) |
+| **Per-block labels** | block | the screen's own Zarr coords, normalized to strings at load | source of truth; maintains the union; enables correct delete/overwrite |
+| **Present union** | dataset (gene dims) | union of all loaded blocks' labels, maintained at load | what `GET /dimensions/{dim}` returns ("**what exists**") |
+
+A single universe (HGNC entrez + `Cas9`) is used for every gene dimension —
+simpler than a per-dimension universe, and sufficient for validation. The
+endpoint returns the *present* set (what's actually loaded), **never** the
+universe, so it never claims a gene exists when no screen has it.
+
+### Metadata deltas (SQLite)
+
+- **`dataset.dimensions[dim]`** gains a **`gene_universe`** (validation superset), and
+  its **`labels` is redefined as the present union** — maintained at load, no
+  longer frozen from the first block. The pinned Taiga id used to build the
+  universe is recorded on the dataset for provenance.
+- **`block`** gains a **`labels`** JSON column: `{dim_name: [labels…]}` — the
+  screen's own coordinate labels (strings). This is the source of truth for
+  maintaining the union and for recomputing it on delete/overwrite.
+  *No migration for existing data — it is repopulated on reload.*
+
+ERD delta (**bold** = new/changed):
+
+```
+DATASET  … , dimensions: [{name, universe(new), labels(=present union)}] , universe_taiga_id(new)
+BLOCK    … , labels(new): {dim: [str, …]}
+```
+
+### Behavior changes
+
+- **Query `index`** — built from the opened **block's Zarr coordinates**
+  (post-`.sel()`), not the dataset row. Index length always equals data length.
+- **`GET /datasets/{dataset}/dimensions/{dim}`** — returns the **present union**
+  (what's actually loaded), read from the maintained union column: one fast DB
+  read, no disk. Per-block `labels` keep the union correct through deletes and
+  overwrites without re-reading Zarr.
+- **Multi-block queries** across screens with different gene sets — align to the
+  **union** and fill missing cells with **NaN** (a gene absent from a screen reads
+  as NaN), matching the biology ("a missing gene ≡ that gene with all-NAs").
+- **Labels are strings everywhere** — coordinate arrays are normalized to strings
+  at load, so validation, `.sel()`, the index, and the union all compare
+  apples-to-apples (no `"9992"` vs `9992` vs `9992.0`). Non-entrez tokens like
+  `Cas9` live in the same string lists.
+
+### Validation delta (§7)
+
+The "per-block label agreement not enforced" note is replaced by:
+
+- **Each block's gene labels must be ⊆ the dataset universe**, else the load
+  fails with a clear error naming the offending IDs.
+- The universe is **declared at dataset creation** (from the pinned Taiga table),
+  never inferred from the first block. A library/probe-set change is handled as a
+  **new dataset** (no in-place universe edits).
+
+### Lifecycle delta (§9)
+
+- **Load block** → normalize coords to strings → validate `⊆ universe` → write the
+  Zarr → store the block's `labels` → fold them into the dataset's present union.
+- **Delete / overwrite block** → drop/replace the block's `labels` → recompute the
+  present union from the remaining blocks' labels (local, fast).

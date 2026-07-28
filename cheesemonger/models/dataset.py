@@ -2,7 +2,7 @@
 
 Dimensions, datatypes, and chunk_shape are stored as JSON columns. These are
 complex nested structures (dimensions can have 50k+ labels) that don't benefit
-from being individual rows — they're always read and written as a unit.
+from being individual rows, they're always read and written as a unit.
 """
 
 from datetime import UTC, datetime
@@ -36,6 +36,8 @@ class SchemaDict(TypedDict):
     dimensions: list[DimensionDict]
     datatypes: list[DatatypeDict]
     chunk_shape: list[ChunkDimDict]
+    # {dim_name: [label, ...]}, validation superset per gene dimension.
+    gene_universe: dict[str, list[str]]
 
 
 class Dataset(Base, UUIDMixin):
@@ -43,11 +45,17 @@ class Dataset(Base, UUIDMixin):
 
     name: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
     last_dimension: Mapped[str] = mapped_column(String, nullable=False)
+    # `dimensions[*].labels` is the PRESENT UNION, the labels actually loaded
+    # across all blocks, maintained at load (not frozen from the first block).
     dimensions: Mapped[list[DimensionDict]] = mapped_column(JSON, nullable=False)
     datatypes: Mapped[list[DatatypeDict]] = mapped_column(JSON, nullable=False)
     chunk_shape: Mapped[list[ChunkDimDict]] = mapped_column(
         JSON, nullable=False, default=list
     )
+    # {dim_name: [label, ...]}, validation superset for gene dimensions (e.g.
+    # HGNC entrez IDs + "Cas9"). A block's labels along a listed dim must be a
+    # subset. Dims absent here are not label-validated (e.g. Timepoint).
+    gene_universe: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )

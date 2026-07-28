@@ -14,7 +14,7 @@ from .common import (
 
 class DatasetIn(BaseModel):
     """A dataset schema. Built by the loader (from an inferred source store),
-    not accepted over HTTP — the API is read-only."""
+    not accepted over HTTP, the API is read-only."""
 
     name: SafeName
     last_dimension: SafeName
@@ -23,6 +23,10 @@ class DatasetIn(BaseModel):
     # Omitted dimensions use their full extent (a single chunk). An empty list
     # means no dimension is explicitly chunked.
     chunk_shape: list[ChunkDim] = []
+    # {dim_name: [label, ...]}, validation superset per gene dimension. A
+    # block's labels along a listed dim must be a subset. Empty = no dimension
+    # is label-validated.
+    gene_universe: dict[str, list[str]] = {}
 
 
 class DatasetSummary(BaseModel):

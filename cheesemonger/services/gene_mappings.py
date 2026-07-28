@@ -15,7 +15,7 @@ def _normalize_entrez(value: object) -> str | None:
     """Coerce a raw entrez id cell to a clean string key, or None to skip it.
 
     Coordinate labels in the stores are entrez ids, looked up client-side via
-    ``str(label)`` — so the map keys must be the plain integer form ("1"), not
+    ``str(label)``. So the map keys must be the plain integer form ("1"), not
     a float ("1.0") or a NaN. HGNC stores entrez_id as float64 with missing
     values, hence the normalization here.
     """
