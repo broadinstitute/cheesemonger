@@ -288,10 +288,9 @@ the DB). A reconcile/cleanup step is a future item (§10).
 Tracked in [planning.md](planning.md):
 
 - **Per-block coordinate labels (`TODO(per-block-coords)`) — RESOLVED (§11).**
-  The response index is now built from each block's own Zarr coordinates, and a
-  dataset declares a gene universe for load-time validation. Only multi-block
-  queries over screens with *different* label sets remain unsupported (they raise
-  a clear error pending union + NaN-fill alignment).
+  The response index is built from each block's own Zarr coordinates; a dataset
+  declares a gene universe for load-time validation; and multi-block queries over
+  screens with different label sets are aligned to the union with NaN-fill.
 - **Broadcasted form required.** The query engine applies every fixed-dimension
   selection to each datatype, so it needs the "broadcasted" store (every datatype
   spans all selected dims). Reduced-rank datatypes are representable in the model
@@ -307,10 +306,9 @@ Tracked in [planning.md](planning.md):
 
 ## 11. Gene universe & present-union labels
 
-> **Status: IMPLEMENTED** — load path + single-block query index; multi-block
-> ragged alignment (union + NaN-fill) is the only remaining piece. Resolves the
-> per-block-coords limitation (§10). Full problem writeup:
-> [per_block_labels_issue.md](per_block_labels_issue.md).
+> **Status: IMPLEMENTED** — load path, single-block query index, and multi-block
+> union + NaN-fill alignment. Resolves the per-block-coords limitation (§10).
+> Full problem writeup: [per_block_labels_issue.md](per_block_labels_issue.md).
 >
 > **Implemented (load path):**
 > - `dataset.gene_universe` column ({dim: [labels]}) — the validation superset.
@@ -328,11 +326,10 @@ Tracked in [planning.md](planning.md):
 >
 > **Implemented (query path):** the response `index` is built from each block's
 > *own Zarr coordinates* (captured at read in `query._free_coords`), so index
-> length always matches the data — the fix for the reported crash.
->
-> **Pending:** multi-block queries over screens with *different* label sets
-> (union + NaN-fill alignment). These currently raise a clear error
-> (`query._stack_blocks`) instead of stacking mismatched shapes.
+> length always matches the data — the fix for the reported crash. Multi-block
+> queries over screens with *different* label sets are aligned to the union of
+> labels with NaN-fill (`query._align_blocks`); NaN-aware aggregators ignore the
+> fills, so a gene measured in only some screens aggregates over those screens.
 >
 > **Design note — no per-block `labels` column.** Rather than persist each
 > block's labels, the present union is maintained at the dataset level and

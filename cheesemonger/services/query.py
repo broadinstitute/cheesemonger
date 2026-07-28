@@ -205,24 +205,49 @@ def _index_from_coords(free_coords: list[tuple[str, list[str]]]) -> list[IndexLe
     return [IndexLevel(dimension=dim, labels=labels) for dim, labels in free_coords]
 
 
-def _stack_blocks(arrays: list[np.ndarray], block_names: list[str]) -> np.ndarray:
-    """Stack per-block arrays on a new leading axis, with a clear error on mismatch.
+def _align_blocks(
+    reads: list[BlockRead],
+) -> tuple[list[np.ndarray], list[tuple[str, list[str]]]]:
+    """Align per-block arrays to the union of their labels along every free dim.
 
-    Blocks that measured different label sets produce different-shaped arrays,
-    which cannot be stacked. Cross-block queries over ragged screens (union +
-    NaN-fill alignment) are not yet supported — surface that as a QueryError
-    rather than a raw numpy ValueError.
+    Screens measure different label sets, so their raw arrays differ in shape.
+    Each block is reindexed onto the per-dim union (first-seen order across
+    blocks), filling labels the block lacks with NaN — the biological model that
+    "a gene a screen didn't measure reads as NaN". Returns the aligned arrays
+    (all now the same shape) and the union coords for the response index.
+
+    Fast path: when every block already carries identical labels, the reindex is
+    a no-op and the shapes were equal anyway.
     """
-    try:
-        return np.stack(arrays)
-    except ValueError as e:
-        raise QueryError(
-            f"Cannot combine blocks {block_names} in one query: their label sets "
-            "differ, so the results have different shapes. Cross-block queries "
-            "over screens with different labels (union + NaN alignment) are not "
-            "yet supported — query a single block, or aggregate over the last "
-            "dimension."
-        ) from e
+    _, first_coords = reads[0]
+    dims = [dim for dim, _ in first_coords]
+
+    if not dims:
+        # Scalar per block (every dim selected/aggregated away) — nothing to align.
+        return [arr for arr, _ in reads], []
+
+    # Per-dim union of labels, first-seen across blocks (deterministic order).
+    union: dict[str, list[str]] = {}
+    for i, dim in enumerate(dims):
+        seen: set[str] = set()
+        merged: list[str] = []
+        for _, coords in reads:
+            for lbl in coords[i][1]:
+                if lbl not in seen:
+                    seen.add(lbl)
+                    merged.append(lbl)
+        union[dim] = merged
+
+    aligned: list[np.ndarray] = []
+    for arr, coords in reads:
+        block_labels = {dim: coords[i][1] for i, dim in enumerate(dims)}
+        if all(block_labels[dim] == union[dim] for dim in dims):
+            aligned.append(arr)  # already full — skip the reindex
+            continue
+        da = xr.DataArray(arr, dims=dims, coords=block_labels)
+        da = da.reindex({dim: union[dim] for dim in dims}, fill_value=np.nan)  # type: ignore[arg-type]
+        aligned.append(da.values)
+    return aligned, [(dim, union[dim]) for dim in dims]
 
 
 class QueryService:
@@ -335,21 +360,24 @@ class QueryService:
     ) -> QueryOut:
         """Aggregate raw values across blocks.
 
-        Collects raw per-block arrays, stacks them along axis 0, then applies the
-        aggregation once — never mean-of-means (or median-of-medians, etc.). The
-        index comes from the first block's coordinates (post-selection).
+        Aligns per-block arrays to the union of their labels (NaN-filling what a
+        block lacks), stacks along axis 0, then applies the aggregation once —
+        never mean-of-means. NaN-aware reducers ignore the fills, so a gene
+        measured in only some screens is aggregated over the screens that have
+        it. The index is the union coords.
         """
         data: dict[str, list | float | int | None] = {}
         sample_arr = None
+        index_coords: list[tuple[str, list[str]]] = []
         for dt in datatypes:
-            per_block = [all_results[b][dt][0] for b in target_blocks]
-            stacked = _stack_blocks(per_block, target_blocks)
-            agg_result = _aggregate_array(stacked, 0, aggregate)
+            aligned, union_coords = _align_blocks([all_results[b][dt] for b in target_blocks])
+            agg_result = _aggregate_array(np.stack(aligned), 0, aggregate)
             data[dt] = _numpy_to_json(agg_result)
             if sample_arr is None:
                 sample_arr = agg_result
+                index_coords = union_coords
 
-        index = _index_from_coords(all_results[target_blocks[0]][datatypes[0]][1])
+        index = _index_from_coords(index_coords)
         shape = list(sample_arr.shape) if sample_arr is not None and sample_arr.ndim > 0 else []
 
         return QueryOut(
@@ -376,7 +404,7 @@ class QueryService:
                 sample_arr = arr
 
         # Index labels come from THIS block's coordinates (captured at read), so
-        # index length always matches the data — the per-block-coords fix.
+        # the index length always matches the data.
         index = _index_from_coords(all_results[block][datatypes[0]][1])
         shape = list(sample_arr.shape) if sample_arr is not None and sample_arr.ndim > 0 else []
 
@@ -397,22 +425,23 @@ class QueryService:
         """Build response for multi-block queries without cross-block aggregation.
 
         The last_dimension appears in the index as a regular dimension. Data
-        arrays gain an extra leading dimension for blocks. The inner index comes
-        from the first block's coordinates; blocks whose label sets differ can't
-        be stacked and raise a clear error (see _stack_blocks).
+        arrays gain an extra leading dimension for blocks. Blocks whose label
+        sets differ are aligned to the union with NaN-fill (see _align_blocks);
+        the inner index is the union coords.
         """
         data: dict[str, list | float | int | None] = {}
         sample_arr = None
+        inner_coords: list[tuple[str, list[str]]] = []
         for dt in datatypes:
-            per_block = [all_results[b][dt][0] for b in target_blocks]
-            stacked = _stack_blocks(per_block, target_blocks)
+            aligned, union_coords = _align_blocks([all_results[b][dt] for b in target_blocks])
+            stacked = np.stack(aligned)
             data[dt] = _numpy_to_json(stacked)
             if sample_arr is None:
                 sample_arr = stacked
+                inner_coords = union_coords
 
         block_index = IndexLevel(dimension=last_dim, labels=target_blocks)
-        inner_index = _index_from_coords(all_results[target_blocks[0]][datatypes[0]][1])
-        index = [block_index, *inner_index]
+        index = [block_index, *_index_from_coords(inner_coords)]
 
         shape = list(sample_arr.shape) if sample_arr is not None else []
 

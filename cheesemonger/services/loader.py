@@ -109,8 +109,10 @@ def _validate_against_schema(
 ) -> None:
     """Ensure the source's dims and datatypes are declared in the dataset schema.
 
-    Coordinate *labels* are intentionally not checked: separate blocks (screens)
-    legitimately carry different Target/Response label sets.
+    This checks dimension/datatype *names* only. Coordinate *labels* are validated
+    separately against the gene universe (``_validate_against_gene_universe``);
+    they are not required to match other blocks, since screens legitimately carry
+    different Target/Response label sets.
     """
     schema_dims = {d["name"] for d in schema["dimensions"]}
     schema_dts = {d["name"] for d in schema["datatypes"]}

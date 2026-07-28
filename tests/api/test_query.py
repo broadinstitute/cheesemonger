@@ -501,9 +501,9 @@ def test_index_uses_block_coords_not_dataset_labels(client, settings, db):
     assert len(idx[0]["labels"]) == len(body["data"]["ZScore"]) == 2
 
 
-def test_multiblock_ragged_labels_raise_clear_error(client, settings, db):
-    """Two screens with different gene sets can't be stacked in one query yet —
-    the engine raises a clear 422 rather than a raw numpy shape error."""
+def test_multiblock_ragged_labels_union_nan_aligned(client, settings, db):
+    """Two screens with different gene sets are aligned to the union of labels;
+    a gene a screen lacks reads as NaN (null in JSON)."""
     ds_crud.create_dataset(db, DatasetIn(**SCHEMA))
     _write_block(settings, db, "A", ["103", "226", "672", "7157"])  # 4 genes
     _write_block(settings, db, "B", ["103", "226"])                 # 2 genes
@@ -516,5 +516,36 @@ def test_multiblock_ragged_labels_raise_clear_error(client, settings, db):
             {"dimension": "testedperturbation", "value": "103"},
         ],
     })
-    assert r.status_code == 422, r.text
-    assert "label sets" in r.json()["detail"].lower()
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["index"][0]["dimension"] == "screen"
+    # inner index = union of both screens' genes (A's order; B adds nothing new)
+    assert body["index"][1]["labels"] == ["103", "226", "672", "7157"]
+    assert body["shape"] == [2, 4]
+    rows = dict(zip(body["index"][0]["labels"], body["data"]["ZScore"], strict=True))
+    assert rows["A"] == [0.0, 1.0, 2.0, 3.0]
+    # B lacks 672 & 7157 -> NaN -> null, at the union positions
+    assert rows["B"] == [0.0, 1.0, None, None]
+
+
+def test_multiblock_ragged_aggregation_ignores_nan(client, settings, db):
+    """Cross-block mean over ragged screens: a gene present in only one screen
+    averages to that screen's value (NaN fills are ignored)."""
+    ds_crud.create_dataset(db, DatasetIn(**SCHEMA))
+    _write_block(settings, db, "A", ["103", "226", "672", "7157"])  # 4 genes
+    _write_block(settings, db, "B", ["103", "226"])                 # 2 genes
+    db.commit()
+
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+        ],
+        "aggregate": {"type": "mean", "over": "screen"},
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["index"][0]["labels"] == ["103", "226", "672", "7157"]
+    # 103: mean(0, 0)=0 ; 226: mean(1,1)=1 ; 672: only A (2) ; 7157: only A (3)
+    assert body["data"]["ZScore"] == [0.0, 1.0, 2.0, 3.0]

@@ -45,8 +45,8 @@ class Dataset(Base, UUIDMixin):
 
     name: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
     last_dimension: Mapped[str] = mapped_column(String, nullable=False)
-    # `dimensions[*].labels` is the PRESENT UNION, the labels actually loaded
-    # across all blocks, maintained at load (not frozen from the first block).
+    # `dimensions[*].labels` is the present union: the labels actually loaded
+    # across all blocks, maintained at load.
     dimensions: Mapped[list[DimensionDict]] = mapped_column(JSON, nullable=False)
     datatypes: Mapped[list[DatatypeDict]] = mapped_column(JSON, nullable=False)
     chunk_shape: Mapped[list[ChunkDimDict]] = mapped_column(

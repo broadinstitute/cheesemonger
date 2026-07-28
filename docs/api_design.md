@@ -99,8 +99,8 @@ billion measurements) lives in Zarr stores on disk.
 
 ### Gene universe & present-union labels
 
-> **Status: IMPLEMENTED** (single-block query + load path); multi-block ragged
-> alignment pending. Full design:
+> **Status: IMPLEMENTED** (load path, single-block query, and multi-block union +
+> NaN-fill alignment). Full design:
 > [data_model.md §11](data_model.md#11-gene-universe--present-union-labels)
 > and [per_block_labels_issue.md](per_block_labels_issue.md).
 
@@ -120,14 +120,12 @@ dataset labels:
 - **All coordinate labels are strings** (entrez IDs like `"9992"`, plus tokens like
   `Cas9`).
 
-The query `index` is now built from **each block's own Zarr coordinates**
-(captured at read time), so a single-block query's index length always matches
-its data — fixing the "N columns passed, passed data had M columns" crash.
-
-**Still pending:** cross-block queries over screens with *different* label sets
-(union + NaN-fill alignment). Those currently raise a clear `422` rather than
-attempting to stack mismatched shapes; single-block and same-shape multi-block
-queries work.
+The query `index` is built from **each block's own Zarr coordinates** (captured
+at read time), so a single-block query's index length always matches its data —
+fixing the "N columns passed, passed data had M columns" crash. Cross-block
+queries over screens with *different* label sets are **aligned to the union of
+labels with NaN-fill**: a gene a screen lacks reads as `null`, and NaN-aware
+aggregations (mean/median/…) ignore the fills.
 
 ---
 
