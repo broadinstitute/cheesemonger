@@ -12,7 +12,7 @@ query engine handles this: a selection on a dim a datatype lacks is ignored for
 that datatype rather than erroring (see services/query.py). No broadcast-on-load
 is needed.
 
-Per-block coordinate labels: a dataset declares a *gene_universe* (the validation
+Per-block coordinate labels: a dataset declares a *gene universe* (the validation
 superset for gene dimensions); every block's labels must be a subset of it. The
 dataset's ``dimensions[*].labels`` is the *present union* — the labels actually
 loaded across blocks — maintained here at load (fold-in on add) and recomputed
@@ -138,7 +138,7 @@ def _validate_against_gene_universe(
     Only dims present in ``gene_universe`` are checked (gene dims); other dims (e.g.
     Timepoint) are unconstrained. A block that lacks a listed dim entirely
     (reduced-rank) is fine — there is nothing to validate. Labels are normalized
-    the same way as the gene_universe so the comparison is apples-to-apples.
+    the same way as the gene universe so the comparison is apples-to-apples.
     """
     for dim, allowed in gene_universe.items():
         if dim not in src.sizes:
@@ -355,7 +355,7 @@ def load_block(
                 f"infer its schema from the source store."
             )
 
-        # Validate the block's labels against the gene_universe BEFORE writing to
+        # Validate the block's labels against the gene universe BEFORE writing to
         # disk — fail fast rather than leaving an out-of-gene_universe block behind.
         _validate_against_gene_universe(src, resolved_gene_universe, dataset)
 

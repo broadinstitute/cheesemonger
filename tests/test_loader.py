@@ -15,11 +15,13 @@ from sqlalchemy.orm import sessionmaker
 from cheesemonger.crud import dataset as ds_crud
 from cheesemonger.models.base import Base
 from cheesemonger.schemas.query import QueryIn, Selection
+from cheesemonger.services.gene_universe import build_gene_universe
 from cheesemonger.services.loader import (
     LoaderError,
     delete_block,
     delete_dataset,
     load_block,
+    reconcile_dataset,
 )
 from cheesemonger.services.query import QueryService
 
@@ -392,10 +394,7 @@ def test_delete_missing_dataset_errors(tmp_path, loader_db):
         delete_dataset("nope", data_dir, db=loader_db)
 
 
-# --- Gene gene_universe & present-union maintenance -----------------------------
-
-from cheesemonger.services.loader import reconcile_dataset  # noqa: E402
-from cheesemonger.services.gene_universe import build_gene_universe  # noqa: E402
+# --- Gene universe & present-union maintenance -----------------------------
 
 
 def _store_with_targets(tmp_path, name, targets):

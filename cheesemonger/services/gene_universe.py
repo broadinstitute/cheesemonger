@@ -10,7 +10,7 @@ Two sources, mirroring the gene-mapping service:
 
 Extra tokens (e.g. ``Cas9``) are appended to either source.
 
-``normalize_label`` is the single normalization used for BOTH the gene_universe and
+``normalize_label`` is the single normalization used for BOTH the gene universe and
 each block's coordinate labels, so the subset check compares apples to apples
 (e.g. a Taiga ``entrez_id`` float ``9992.0`` and a stored coord ``"9992"`` both
 normalize to ``"9992"``).
