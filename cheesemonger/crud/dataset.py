@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from cheesemonger.models.dataset import Block, Dataset, SchemaDict
+from cheesemonger.models.dataset import Block, Dataset, DimensionDict, SchemaDict
 from cheesemonger.schemas.dataset import DatasetIn
 
 
@@ -70,10 +70,15 @@ def set_present_labels(
     ds = get_dataset_by_name(db, dataset_name)
     if ds is None:
         raise ValueError(f"Dataset {dataset_name!r} does not exist")
-    dims = [dict(d) for d in ds.dimensions]
-    for d in dims:
-        if d["name"] in labels_by_dim:
-            d["labels"] = list(labels_by_dim[d["name"]])
+    dims: list[DimensionDict] = [
+        {
+            "name": d["name"],
+            "labels": list(labels_by_dim[d["name"]])
+            if d["name"] in labels_by_dim
+            else list(d["labels"]),
+        }
+        for d in ds.dimensions
+    ]
     ds.dimensions = dims
     db.flush()
 
@@ -89,10 +94,11 @@ def union_present_labels(
     ds = get_dataset_by_name(db, dataset_name)
     if ds is None:
         raise ValueError(f"Dataset {dataset_name!r} does not exist")
-    dims = [dict(d) for d in ds.dimensions]
-    for d in dims:
+    dims: list[DimensionDict] = []
+    for d in ds.dimensions:
         new = labels_by_dim.get(d["name"])
         if not new:
+            dims.append(d)
             continue
         seen = set(d["labels"])
         merged = list(d["labels"])
@@ -100,7 +106,7 @@ def union_present_labels(
             if lbl not in seen:
                 seen.add(lbl)
                 merged.append(lbl)
-        d["labels"] = merged
+        dims.append({"name": d["name"], "labels": merged})
     ds.dimensions = dims
     db.flush()
 

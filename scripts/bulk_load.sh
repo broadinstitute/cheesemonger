@@ -24,7 +24,10 @@
 #                     use 32–64 for full-size screens to avoid millions of files)
 #   LAST_DIMENSION    name of the block key, set when each dataset is created
 #                     (default: Screen)
-#   OVERWRITE=1       replace blocks that already exist (for reruns)
+#   SKIP_EXISTING=1   skip blocks that are already loaded instead of erroring —
+#                     the safe way to rerun after an interrupted load. A block
+#                     left half-written by a crash self-heals (it is reloaded).
+#                     To replace a good block, delete-block it first.
 #   DRY_RUN=1         print the commands without running them
 #   CHEESE_CONTAINER  docker container name (default: cheesemonger)
 set -o pipefail
@@ -35,13 +38,13 @@ CONTAINER="${CHEESE_CONTAINER:-cheesemonger}"
 PREFIX="${DATASET_PREFIX:-$(basename "$BUCKET")}"
 TARGET_CHUNK="${TARGET_CHUNK:-1}"
 LAST_DIMENSION="${LAST_DIMENSION:-Screen}"
-OVERWRITE="${OVERWRITE:-}"
+SKIP_EXISTING="${SKIP_EXISTING:-}"
 DRY_RUN="${DRY_RUN:-}"
 
 tty=()
 [ -t 1 ] && tty=(-t)
-ow=()
-[ -n "$OVERWRITE" ] && ow=(--overwrite)
+skip=()
+[ -n "$SKIP_EXISTING" ] && skip=(--skip-existing)
 
 # Per-dataset source suffix + chunk flags. degs/correlates get query-aligned
 # chunking (fix Target+Timepoint, read the vector axis whole); the tiny
@@ -81,7 +84,7 @@ load_one() {  # dataset  source  "chunk flags"  screen
     [ -n "$DRY_RUN" ] && return 0
     # shellcheck disable=SC2086  (chunks must word-split into flags)
     if ! _cli load --source "$source" --dataset "$dataset" --block "$screen" \
-            --last-dimension "$LAST_DIMENSION" --create-dataset $chunks "${ow[@]}"; then
+            --last-dimension "$LAST_DIMENSION" --create-dataset $chunks "${skip[@]}"; then
         failures+=("$dataset/$screen")
     fi
 }

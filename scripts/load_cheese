@@ -30,7 +30,7 @@ load_cheese — cheesemonger admin CLI wrapper (runs inside the Docker container
 
 Usage:
   load_cheese load          --source <gs://...|path> --dataset <name> --block <name>
-                            [--create-dataset] [--overwrite]
+                            [--create-dataset] [--skip-existing]
                             [--last-dimension screen] [--chunk DIM=SIZE ...]
   load_cheese delete-block  --dataset <name> --block <name>
   load_cheese delete-dataset --dataset <name> [--force]

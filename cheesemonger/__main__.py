@@ -116,13 +116,20 @@ def _cmd_load(args: argparse.Namespace) -> None:
                 db=db,
                 last_dimension=args.last_dimension,
                 create_dataset=args.create_dataset,
-                overwrite=args.overwrite,
+                skip_existing=args.skip_existing,
                 chunk_shape=_parse_chunks(args.chunk) or None,
                 gene_universe=gene_universe,
             )
     except LoaderError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
+
+    if summary.get("skipped"):
+        print(
+            f"Skipped block '{summary['block']}' in dataset '{summary['dataset']}' "
+            f"(already loaded)\n  path: {summary['path']}"
+        )
+        return
 
     print(
         f"Loaded block '{summary['block']}' into dataset '{summary['dataset']}'\n"
@@ -236,8 +243,10 @@ def main() -> None:
         help="Infer and create the dataset schema from the source if it doesn't exist",
     )
     load_parser.add_argument(
-        "--overwrite", action="store_true",
-        help="Replace the block if it already exists",
+        "--skip-existing", action="store_true",
+        help="If the block is already loaded, skip it instead of erroring "
+             "(the safe way to rerun an interrupted bulk load). To replace a "
+             "block, delete it first (delete-block) — there is no overwrite.",
     )
     load_parser.add_argument(
         "--chunk", action="append", default=[], metavar="DIM=SIZE",

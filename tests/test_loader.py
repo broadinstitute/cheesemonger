@@ -279,7 +279,7 @@ def test_load_missing_dataset_without_create_errors(tmp_path, loader_db):
         load_block(source, "nope", "PS-SC-1", data_dir, db=loader_db, create_dataset=False)
 
 
-def test_load_existing_block_requires_overwrite(tmp_path, loader_db):
+def test_load_existing_block_errors_without_skip(tmp_path, loader_db):
     source = _source_store(tmp_path)
     data_dir = str(tmp_path / "data")
     load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db, create_dataset=True)
@@ -287,8 +287,36 @@ def test_load_existing_block_requires_overwrite(tmp_path, loader_db):
     with pytest.raises(LoaderError, match="already exists"):
         load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db)
 
-    summary = load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db, overwrite=True)
+
+def test_skip_existing_leaves_block_untouched(tmp_path, loader_db):
+    source = _source_store(tmp_path)
+    data_dir = str(tmp_path / "data")
+    load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db, create_dataset=True)
+
+    summary = load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db, skip_existing=True)
+    assert summary["skipped"] is True
     assert summary["block"] == "PS-SC-1"
+    # Still exactly one block registered — nothing re-created.
+    assert ds_crud.list_block_names(loader_db, "ds1") == ["PS-SC-1"]
+
+
+def test_partial_block_dir_is_healed_on_reload(tmp_path, loader_db):
+    """A block dir on disk with no DB row (interrupted load) is reloaded, not skipped."""
+    source = _source_store(tmp_path)
+    data_dir = str(tmp_path / "data")
+    load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db, create_dataset=True)
+
+    # Simulate a crash mid-write on a *new* block: a directory on disk with no
+    # DB row. Even under skip_existing, it must be reloaded (not treated as done).
+    from cheesemonger.services import dataset as ds_paths
+    partial = ds_paths.block_dir(data_dir, "ds1", "PS-SC-2")
+    partial.mkdir(parents=True)
+    (partial / "junk").write_text("half-written")
+
+    summary = load_block(source, "ds1", "PS-SC-2", data_dir, db=loader_db, skip_existing=True)
+    assert summary["skipped"] is False
+    assert not (partial / "junk").exists()  # stale dir was cleared before the write
+    assert sorted(ds_crud.list_block_names(loader_db, "ds1")) == ["PS-SC-1", "PS-SC-2"]
 
 
 def test_load_rejects_undeclared_datatype(tmp_path, loader_db):
@@ -473,17 +501,43 @@ def test_present_union_shrinks_on_delete(tmp_path, loader_db):
     assert _target_labels(loader_db, "ds") == ["A", "B"]
 
 
-def test_overwrite_recomputes_union(tmp_path, loader_db):
+def test_replace_via_delete_then_reload_updates_union(tmp_path, loader_db):
+    """Replacement is delete-block + reload (there is no overwrite)."""
     data_dir = str(tmp_path / "data")
     gene_universe = {"Target": ["A", "B", "C"]}
     s1 = _store_with_targets(tmp_path, "s1.zarr", ["A", "B"])
     load_block(s1, "ds", "B1", data_dir, db=loader_db,
                last_dimension="screen", create_dataset=True, gene_universe=gene_universe)
+    delete_block("ds", "B1", data_dir, db=loader_db)
     s1b = _store_with_targets(tmp_path, "s1b.zarr", ["C"])
-    load_block(s1b, "ds", "B1", data_dir, db=loader_db,
-               last_dimension="screen", overwrite=True)
+    load_block(s1b, "ds", "B1", data_dir, db=loader_db, last_dimension="screen")
     # the only block was replaced → union reflects the new labels only
     assert _target_labels(loader_db, "ds") == ["C"]
+
+
+def test_post_write_check_rejects_truncated_write(tmp_path, loader_db, monkeypatch):
+    """If the write produces a store that doesn't match the source, nothing commits."""
+    from cheesemonger.services import loader as loader_mod
+
+    source = _source_store(tmp_path)
+    data_dir = str(tmp_path / "data")
+
+    # Force the on-disk store to disagree with the source: drop a data variable
+    # after the real write, so the structural check must fail.
+    real_write = loader_mod._write_dataset
+
+    def corrupt_write(ds, dest, chunk_shape=None):
+        real_write(ds.drop_vars("L2FC"), dest, chunk_shape)
+
+    monkeypatch.setattr(loader_mod, "_write_dataset", corrupt_write)
+
+    with pytest.raises(LoaderError, match="Post-write check failed"):
+        load_block(source, "ds1", "PS-SC-1", data_dir, db=loader_db, create_dataset=True)
+
+    # The bad write was removed and no block row was committed.
+    from cheesemonger.services import dataset as ds_paths
+    assert not ds_paths.block_dir(data_dir, "ds1", "PS-SC-1").exists()
+    assert ds_crud.list_block_names(loader_db, "ds1") == []
 
 
 def test_reconcile_rebuilds_union_from_disk(tmp_path, loader_db):

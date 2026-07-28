@@ -162,7 +162,7 @@ def _block_labels_by_dim(src: xr.Dataset) -> dict[str, list[str]]:
 def _recompute_present_union(db: Session, dataset: str, data_dir: str) -> None:
     """Recompute the present union for every dim from the blocks on disk.
 
-    Used after a removal/overwrite, where the union may *shrink* and so cannot be
+    Used after a removal, where the union may *shrink* and so cannot be
     maintained incrementally. Reads each remaining block's coordinate vectors (a
     small per-dim array, not the data variables) and unions them, preserving
     first-seen order across blocks (sorted block order, for determinism). Flushes
@@ -289,6 +289,60 @@ def _normalized_block(block: str) -> str:
     return normalized
 
 
+def _verify_written_store(src: xr.Dataset, dest, block: str) -> None:
+    """Reopen a freshly written block and check it matches the source.
+
+    A structural check (not a full data read): confirms the store reopens and
+    that its data-variable names, dimension sizes, per-variable dims, and
+    coordinate labels equal the source's. This catches a wrong/empty/truncated
+    write cheaply — before the DB row is committed. Raises LoaderError on any
+    mismatch so the caller can discard the write and leave nothing registered.
+
+    It does not read every chunk, so it cannot detect a silently missing chunk
+    (Zarr backfills those with a fill value). Structural drift and gross write
+    failures — the common interrupted-load outcomes — are caught.
+    """
+    try:
+        written = xr.open_zarr(str(dest))
+    except Exception as e:
+        raise LoaderError(
+            f"Post-write check failed: block {block!r} could not be reopened at "
+            f"{dest}: {e}"
+        ) from e
+    try:
+        src_vars = {str(v) for v in src.data_vars}
+        got_vars = {str(v) for v in written.data_vars}
+        if src_vars != got_vars:
+            raise LoaderError(
+                f"Post-write check failed for block {block!r}: data variables "
+                f"{sorted(got_vars)} != source {sorted(src_vars)}."
+            )
+        for dim in src.sizes:
+            d = str(dim)
+            got = int(written.sizes.get(d, -1))
+            want = int(src.sizes[dim])
+            if got != want:
+                raise LoaderError(
+                    f"Post-write check failed for block {block!r}: dimension {d!r} "
+                    f"size {got} != source {want}."
+                )
+            if _coord_labels(written, d) != _coord_labels(src, d):
+                raise LoaderError(
+                    f"Post-write check failed for block {block!r}: coordinate "
+                    f"labels for {d!r} do not match the source."
+                )
+        for v in src.data_vars:
+            got_dims = tuple(str(x) for x in written[str(v)].dims)
+            want_dims = tuple(str(x) for x in src[v].dims)
+            if got_dims != want_dims:
+                raise LoaderError(
+                    f"Post-write check failed for block {block!r}: datatype {v!r} "
+                    f"dims {got_dims} != source {want_dims}."
+                )
+    finally:
+        written.close()
+
+
 def load_block(
     source: str,
     dataset: str,
@@ -298,11 +352,26 @@ def load_block(
     db: Session,
     last_dimension: str = "Screen",
     create_dataset: bool = False,
-    overwrite: bool = False,
+    skip_existing: bool = False,
     chunk_shape: dict[str, int] | None = None,
     gene_universe: dict[str, list[str]] | None = None,
 ) -> dict:
     """Load a Zarr store as a block of ``dataset``.
+
+    Built to be safely rerun after an interrupted bulk load:
+
+    - A *fully loaded* block (registered in the DB **and** present on disk) is
+      left untouched: with ``skip_existing`` it is reported as skipped without
+      re-reading the source; otherwise it is an error. There is no in-place
+      overwrite — delete the block (delete-block) to replace it.
+    - A block directory on disk with **no** DB row is an uncommitted partial
+      write from an interrupted load (the DB commit happens only after a verified
+      write). It is removed and the block is loaded fresh, so a crash mid-write
+      self-heals on the next run.
+
+    After writing, the store is reopened and structurally verified against the
+    source (see ``_verify_written_store``) before the DB row is committed; a
+    mismatch discards the write and raises, leaving nothing registered.
 
     Args:
         source: Local path or ``gs://`` URL of an xarray-exported Zarr store.
@@ -313,16 +382,39 @@ def load_block(
             session lifecycle (open/close); this function commits its work.
         last_dimension: Name of the block key (only used when creating).
         create_dataset: If the dataset doesn't exist, infer and create it.
-        overwrite: Replace the block if it already exists.
+        skip_existing: If the block is already fully loaded, skip it (report
+            ``skipped``) instead of erroring — the safe way to rerun a bulk load.
         chunk_shape: Dim -> chunk size, applied when *creating* the dataset and
             stored on it. Unlisted dims stay whole. For an existing dataset the
             stored chunk_shape is reused (this arg is ignored) so all blocks
             chunk consistently.
 
     Returns:
-        A summary dict (dataset, block, path, dimensions, datatypes).
+        A summary dict (dataset, block, path, skipped, and — unless skipped —
+        dimensions, datatypes).
     """
     block = _normalized_block(block)
+    dest = ds_paths.block_dir(data_dir, dataset, block)
+    registered = ds_crud.block_exists(db, dataset, block)
+
+    # Fully-loaded block (DB row + on-disk store): skip or refuse, but never
+    # silently re-read a large remote source on a rerun.
+    if registered and dest.exists():
+        if skip_existing:
+            logger.info("Block %r already loaded in dataset %r — skipping.", block, dataset)
+            return {"dataset": dataset, "block": block, "path": str(dest), "skipped": True}
+        raise LoaderError(
+            f"Block {block!r} already exists in dataset {dataset!r}. Delete it "
+            f"first (delete-block) to replace it, or pass skip_existing=True to "
+            f"leave it as is."
+        )
+
+    # A directory with no DB row is an uncommitted partial write from an
+    # interrupted load. It is never a block the API serves, so drop it and load
+    # fresh (self-heal).
+    if dest.exists() and not registered:
+        logger.warning("Removing unregistered block directory (interrupted load?): %s", dest)
+        shutil.rmtree(dest)
 
     logger.info("Opening source store: %s", source)
     try:
@@ -359,16 +451,6 @@ def load_block(
         # disk — fail fast rather than leaving an out-of-gene_universe block behind.
         _validate_against_gene_universe(src, resolved_gene_universe, dataset)
 
-        dest = ds_paths.block_dir(data_dir, dataset, block)
-        if dest.exists():
-            if not overwrite:
-                raise LoaderError(
-                    f"Block {block!r} already exists in dataset {dataset!r}. "
-                    f"Pass overwrite=True to replace it."
-                )
-            logger.info("Overwriting existing block %r", block)
-            shutil.rmtree(dest)
-
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             size_mb = src.nbytes / 1e6
@@ -384,20 +466,30 @@ def load_block(
         )
         _write_dataset(src, str(dest), resolved_chunks)
 
-        # Register the block in the DB and fold its labels into the present
-        # union (an add only grows the union — see crud.union_present_labels).
-        # An overwrite may shrink it, so recompute from all blocks instead.
-        if not ds_crud.block_exists(db, dataset, block):
+        # Structural integrity check before we commit: the write must have
+        # produced a store that matches the source. On mismatch, remove the bad
+        # write and raise — nothing is committed, so a rerun retries cleanly.
+        try:
+            _verify_written_store(src, dest, block)
+        except LoaderError:
+            if dest.exists():
+                shutil.rmtree(dest)
+            raise
+
+        # Register the block (if new) and fold its labels into the present union.
+        # union_present_labels only grows and dedupes, so it is safe both for a
+        # fresh add and for re-materializing a registered block whose dir was
+        # lost. Replacement goes through delete-block (which shrinks the union).
+        if not registered:
             ds_crud.create_block(db, dataset, block)
-            ds_crud.union_present_labels(db, dataset, _block_labels_by_dim(src))
-        else:
-            _recompute_present_union(db, dataset, data_dir)
+        ds_crud.union_present_labels(db, dataset, _block_labels_by_dim(src))
         db.commit()
 
         summary = {
             "dataset": dataset,
             "block": block,
             "path": str(dest),
+            "skipped": False,
             "dimensions": {str(d): int(src.sizes[d]) for d in src.sizes},
             "datatypes": [str(v) for v in src.data_vars],
         }

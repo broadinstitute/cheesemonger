@@ -25,3 +25,9 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tutorial notebooks favour compact, illustrative style: long one-liners and
+# grouped statements (e.g. `plt.xlabel(...); plt.ylabel(...)`). Silence those
+# two style rules there while still catching real issues (undefined names, etc.).
+"examples/**" = ["E501", "E702"]
