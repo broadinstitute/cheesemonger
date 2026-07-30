@@ -178,10 +178,6 @@ def _read_diagonal(
     at [dim_a=label, dim_b=label] (plus any other fixed selections). The index
     is a single ``label`` level over the shared labels found in THIS block.
     """
-    # TODO(perf): Replace the per-label loop with xarray vectorized pointwise
-    # selection: da.sel(dim_a=xr.DataArray(common), dim_b=xr.DataArray(common))
-    # The current loop does ~8,500 individual .sel() calls for a typical
-    # diagonal query and will be slower.
     dim_a, dim_b = diagonal
 
     # Same reduced-rank tolerance as the main read path: skip selections for
@@ -193,13 +189,21 @@ def _read_diagonal(
     labels_a = [str(lbl) for lbl in da.coords[dim_a].values]
     labels_b = [str(lbl) for lbl in da.coords[dim_b].values]
     common = sorted(set(labels_a) & set(labels_b))
+    if not common:
+        return np.array([], dtype=np.float32), [("label", [])]
 
-    values = []
-    for label in common:
-        val = da.sel({dim_a: label, dim_b: label}).values
-        values.append(float(val) if np.ndim(val) == 0 else float(val.flat[0]))
-
-    return np.array(values, dtype=np.float32), [("label", common)]
+    # One vectorized pointwise selection instead of one .sel() per label: passing
+    # DataArray indexers that share a dim makes xarray gather every
+    # (dim_a=label, dim_b=label) point in a single call, so xarray/dask can batch
+    # the reads rather than doing thousands of round trips. Any residual dim
+    # (e.g. an unfixed timepoint) collapses to its first entry, matching the
+    # previous per-label ``val.flat[0]`` behaviour.
+    picker = xr.DataArray(common, dims="label")
+    diag = da.sel({dim_a: picker, dim_b: picker})
+    extra = [d for d in diag.dims if d != "label"]
+    if extra:
+        diag = diag.isel(dict.fromkeys(extra, 0))
+    return diag.values.astype(np.float32), [("label", common)]
 
 
 def _index_from_coords(free_coords: list[tuple[str, list[str]]]) -> list[IndexLevel]:
