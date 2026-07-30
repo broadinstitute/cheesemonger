@@ -40,3 +40,6 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+
+# Images
+docs/**/*.png

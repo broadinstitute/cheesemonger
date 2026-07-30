@@ -549,3 +549,79 @@ def test_multiblock_ragged_aggregation_ignores_nan(client, settings, db):
     assert body["index"][0]["labels"] == ["103", "226", "672", "7157"]
     # 103: mean(0, 0)=0 ; 226: mean(1,1)=1 ; 672: only A (2) ; 7157: only A (3)
     assert body["data"]["ZScore"] == [0.0, 1.0, 2.0, 3.0]
+
+
+# --- List-valued selections (keep a dimension, subset its labels) ----------
+
+
+def test_list_selection_keeps_dim_and_subsets(client, settings, db):
+    """A list value on Target keeps that dim in the result with the selected
+    labels, in the order given."""
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": ["672", "103"]},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # testedperturbation kept (2 selected, order preserved) x testedgeneexpression (4)
+    assert [lvl["dimension"] for lvl in body["index"]] == [
+        "testedperturbation", "testedgeneexpression",
+    ]
+    assert body["index"][0]["labels"] == ["672", "103"]
+    assert body["shape"] == [2, 4]
+    # timepoint=4 rows: 672 -> [8,9,10,11], 103 -> [0,1,2,3]
+    assert body["data"]["ZScore"] == [[8.0, 9.0, 10.0, 11.0], [0.0, 1.0, 2.0, 3.0]]
+
+
+def test_list_selection_with_multiple_datatypes(client, settings, db):
+    """List selection is orthogonal to datatypes: a list value combines with
+    multi-datatype, and both datatypes share the one kept-dimension index."""
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE + 0.5)})
+    r = _query(client, {
+        "datatypes": ["ZScore", "L2FC"],
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": ["672", "103"]},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Shared index: testedperturbation (2, order preserved) x testedgeneexpression (4).
+    assert [lvl["dimension"] for lvl in body["index"]] == [
+        "testedperturbation", "testedgeneexpression",
+    ]
+    assert body["index"][0]["labels"] == ["672", "103"]
+    assert body["shape"] == [2, 4]
+    # Both datatypes returned, each 2x4, over the same index.
+    assert set(body["data"]) == {"ZScore", "L2FC"}
+    assert body["data"]["ZScore"] == [[8.0, 9.0, 10.0, 11.0], [0.0, 1.0, 2.0, 3.0]]
+    assert body["data"]["L2FC"] == [[8.5, 9.5, 10.5, 11.5], [0.5, 1.5, 2.5, 3.5]]
+
+
+def test_list_selection_unknown_label_422(client, settings, db):
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "testedperturbation", "value": ["103", "NOPE"]},
+        ],
+    })
+    assert r.status_code == 422, r.text
+    assert "NOPE" in r.json()["detail"]
+
+
+def test_list_selection_on_block_key_rejected(client, settings, db):
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE), "HT29": _block(BASE, BASE)})
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [{"dimension": "screen", "value": ["SW620", "HT29"]}],
+    })
+    assert r.status_code == 422, r.text
+    assert "block key" in r.json()["detail"].lower()

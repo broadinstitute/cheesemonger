@@ -113,6 +113,14 @@ def query_data(
     block_names = ds_crud.list_block_names(db, dataset)
     block_sel = next((s for s in query.select if s.dimension == last_dim), None)
     if block_sel:
+        if isinstance(block_sel.value, list):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"A list of values for the block key '{last_dim}' is not "
+                    f"supported; select a single block, or omit it to span all."
+                ),
+            )
         block_name = str(block_sel.value)
         if block_name not in block_names:
             raise HTTPException(

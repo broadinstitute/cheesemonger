@@ -113,7 +113,7 @@ def _free_coords(da: xr.DataArray, exclude: str | None = None) -> list[tuple[str
 def _read_datatype_from_ds(
     ds: xr.Dataset,
     datatype: str,
-    array_selections: dict[str, str],
+    array_selections: dict[str, str | list[str]],
     aggregate: AggregateSpec | None,
     diagonal: tuple[str, str] | None,
 ) -> BlockRead:
@@ -140,12 +140,14 @@ def _read_datatype_from_ds(
             da = da.sel(applicable)
     except KeyError as e:
         # Pinpoint which value(s) aren't valid labels so the error is
-        # actionable — xarray's default only says "not all values found".
-        missing = [
-            f"{dim}={val!r}"
-            for dim, val in applicable.items()
-            if str(val) not in {str(x) for x in da.coords[dim].values.tolist()}
-        ]
+        # actionable — xarray's default only says "not all values found". A
+        # selection value may be a scalar or a list; check each element.
+        missing = []
+        for dim, val in applicable.items():
+            valid = {str(x) for x in da.coords[dim].values.tolist()}
+            for v in val if isinstance(val, list) else [val]:
+                if str(v) not in valid:
+                    missing.append(f"{dim}={v!r}")
         if missing:
             raise QueryError(
                 f"Selection value(s) not found in dataset: {', '.join(missing)}"
@@ -167,7 +169,7 @@ def _read_datatype_from_ds(
 
 def _read_diagonal(
     da: xr.DataArray,
-    array_selections: dict[str, str],
+    array_selections: dict[str, str | list[str]],
     diagonal: tuple[str, str],
 ) -> BlockRead:
     """Extract diagonal values where two dimensions share coordinate labels.
@@ -279,16 +281,22 @@ class QueryService:
         last_dim = schema["last_dimension"]
 
         # Separate last_dimension selection (folder routing) from array selections.
-        # Coordinate labels are stored as strings (see loader._stringify_coords),
-        # so coerce selection values to str — a client may send timepoint=4 or
-        # rank=0 as ints, but the store keys on "4"/"0".
+        # Selection values are already strings (Selection canonicalizes them, to
+        # match the string coordinate labels — see loader._stringify_coords). A
+        # list value keeps its dimension in the result (xarray .sel(list)); a
+        # scalar collapses it.
         block_selection: str | None = None
-        array_selections: dict[str, str] = {}
+        array_selections: dict[str, str | list[str]] = {}
         for sel in query.select:
             if sel.dimension == last_dim:
-                block_selection = str(sel.value)
+                if isinstance(sel.value, list):
+                    raise QueryError(
+                        f"A list of values for the block key {last_dim!r} is not "
+                        f"supported; select a single block, or omit it to span all."
+                    )
+                block_selection = sel.value
             else:
-                array_selections[sel.dimension] = str(sel.value)
+                array_selections[sel.dimension] = sel.value
 
         target_blocks = [block_selection] if block_selection else block_names
 

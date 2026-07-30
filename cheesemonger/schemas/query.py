@@ -3,12 +3,28 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Selection(BaseModel):
     dimension: str
-    value: int | str
+    # A scalar fixes the dimension (collapsing it out of the result). A list
+    # selects several labels and keeps the dimension in the result, in the given
+    # order (like pandas fancy indexing). Lists are not allowed on the block key.
+    #
+    # Ints are accepted on the wire (timepoint=4, rank=0) but canonicalized to
+    # str here, coordinate labels are stored as strings so the engine only
+    # ever branches on scalar-vs-list, never on the label's encoding.
+    value: str | list[str]
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _stringify(cls, v: object) -> object:
+        if isinstance(v, list):
+            return [str(x) for x in v]
+        if isinstance(v, (int, str)):
+            return str(v)
+        return v  # anything else falls through to be rejected by the type
 
 
 # Aggregation kinds. The threshold-based counts need `threshold`; the rest don't.

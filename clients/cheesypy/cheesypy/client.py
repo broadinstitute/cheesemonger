@@ -128,6 +128,12 @@ class Cheesemonger:
         assert self._sym2id is not None
         return self._sym2id.get(str(value), value)
 
+    def _to_ids(self, value: Any) -> Any:
+        """Translate a symbol, or a list of symbols, to entrez id(s)."""
+        if isinstance(value, (list, tuple)):
+            return [self._to_id(v) for v in value]
+        return self._to_id(value)
+
     def _relabel_to_symbols(self, resp: dict) -> None:
         if not self._gene_symbols:
             return
@@ -143,7 +149,7 @@ class Cheesemonger:
         dataset: str,
         datatype: str | list[str],
         *,
-        select: dict[str, int | str] | None = None,
+        select: dict[str, int | str | list[int | str]] | None = None,
         aggregate: dict | None = None,
         diagonal: tuple[str, str] | None = None,
         raw: bool = False,
@@ -152,9 +158,11 @@ class Cheesemonger:
 
         Args:
             datatype: One datatype name, or a list for a multi-datatype batch.
-            select: ``{dimension: value}`` fixed selections. Include the block
-                key (e.g. ``screen``) here to target one block; omit it to span
-                all blocks.
+            select: ``{dimension: value}`` fixed selections. A value may be a
+                single label (fixes the dim, dropping it from the result) or a
+                list of labels (keeps the dim, in the given order). Include the
+                block key (e.g. ``screen``) here — as a single value — to target
+                one block; omit it to span all blocks.
             aggregate: ``{"type": "mean"|"median"|"min"|"max"|"count"|"count_lt"|
                 "count_gt"|"abs_gt", "over": dim, "threshold": x}``. ``threshold``
                 is required for the ``count_lt``/``count_gt``/``abs_gt`` types.
@@ -172,9 +180,11 @@ class Cheesemonger:
         if select:
             sel: list[dict[str, Any]] = []
             for dim, val in select.items():
-                sel.append({"dimension": dim, "value": self._to_id(val)})
-                if self._gene_symbols and self._sym2id is not None and str(val) not in self._sym2id:
-                    untranslated.append((dim, val))
+                sel.append({"dimension": dim, "value": self._to_ids(val)})
+                if self._gene_symbols and self._sym2id is not None:
+                    for v in val if isinstance(val, (list, tuple)) else [val]:
+                        if str(v) not in self._sym2id:
+                            untranslated.append((dim, v))
             body["select"] = sel
         if aggregate:
             body["aggregate"] = aggregate
@@ -204,12 +214,22 @@ class Cheesemonger:
         return response_to_pandas(resp, datatypes, single)
 
     def series(
-        self, dataset: str, datatype: str | list[str], *, raw: bool = False, **select: int | str
+        self,
+        dataset: str,
+        datatype: str | list[str],
+        *,
+        raw: bool = False,
+        **select: int | str | list[int | str],
     ) -> Any:
         """Series query: fix dimensions via keyword args, read the rest.
 
-        ``cm.series("perturb-scuba", "ZScore", screen="PS-SC-1",
-        Timepoint="D4", Target="23293")``
+        A keyword value may be a single label or a list of labels; a list keeps
+        that dimension in the result (in the given order)::
+
+            cm.series("perturb-scuba", "ZScore", screen="PS-SC-1",
+                      Timepoint="D4", Target="23293")
+            cm.series("perturb-scuba", "ZScore", screen="PS-SC-1",
+                      Timepoint="D4", Target=["SMG6", "MTPAP"])
         """
         return self.query(dataset, datatype, select=select or None, raw=raw)
 
@@ -222,7 +242,7 @@ class Cheesemonger:
         how: str = "mean",
         threshold: float | None = None,
         raw: bool = False,
-        **select: int | str,
+        **select: int | str | list[int | str],
     ) -> Any:
         """Aggregate over a dimension.
 
