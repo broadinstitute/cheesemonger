@@ -17,6 +17,7 @@ import numpy as np
 import xarray as xr
 
 from cheesemonger.models.dataset import SchemaDict
+from cheesemonger.schemas.filter import Filter, FilterIn, FilterOut
 from cheesemonger.schemas.query import (
     AggregateSpec,
     IndexLevel,
@@ -25,6 +26,89 @@ from cheesemonger.schemas.query import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Hard cap on rows a single filter can return, regardless of the client's
+# `limit`. An unselective predicate (e.g. Correlation > -inf) would otherwise
+# stream the whole cube back; this bounds memory and payload size.
+MAX_FILTER_ROWS = 100_000
+
+# Conservative per-value byte estimate for a serialized result. A JSON float
+# ("-0.12345678") plus list/punctuation overhead runs ~20-30 bytes; string
+# datatypes are similar. Used to reject oversized /query results before reading.
+BYTES_PER_RESULT_ELEMENT = 24
+
+
+def human_bytes(n: int) -> str:
+    """Human-readable byte size in decimal units (matches the GB-based cap)."""
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1000 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.2f} {unit}"
+        size /= 1000
+    return f"{size:.2f} GB"
+
+
+def estimate_result_elements(
+    query: QueryIn, schema: SchemaDict, block_names: list[str]
+) -> int:
+    """Upper-bound the number of values a /query would return, from the schema
+    and selections alone — no disk read.
+
+    The result shape is deterministic before reading: it's the product of the
+    free (unfixed, unaggregated) dimensions' label counts, times the number of
+    datatypes, times the number of blocks when the query spans them. A scalar
+    selection collapses a dim; a list selection subsets it; aggregation removes
+    the reduced dim; a diagonal collapses to the shared-label axis (bounded by
+    the smaller of the two dims). Cross-block aggregation collapses to one block.
+    """
+    last_dim = schema["last_dimension"]
+    dt_dims = {d["name"]: d["dimensions"] for d in schema["datatypes"]}
+    dim_labels = {d["name"]: d.get("labels", []) for d in schema["dimensions"]}
+    queried_dims = dt_dims.get(query.datatypes[0], [])
+
+    scalar_fixed: set[str] = set()
+    list_sizes: dict[str, int] = {}
+    block_selection: str | None = None
+    for sel in query.select:
+        if sel.dimension == last_dim:
+            if not isinstance(sel.value, list):
+                block_selection = sel.value
+        elif isinstance(sel.value, list):
+            list_sizes[sel.dimension] = len(sel.value)
+        else:
+            scalar_fixed.add(sel.dimension)
+
+    agg_over = query.aggregate.over if query.aggregate else None
+
+    if query.diagonal:
+        # 1-D over the shared labels; bounded by the smaller of the two dims.
+        a, b = query.diagonal
+        sizes = [len(dim_labels.get(a, [])), len(dim_labels.get(b, []))]
+        nonzero = [s for s in sizes if s]
+        per_block = min(nonzero) if nonzero else 0
+    else:
+        per_block = 1
+        for d in queried_dims:
+            if d in scalar_fixed or d == agg_over:
+                continue
+            if d in list_sizes:
+                per_block *= list_sizes[d]
+            else:
+                per_block *= max(len(dim_labels.get(d, [])), 1)
+
+    if agg_over == last_dim or block_selection is not None:
+        block_factor = 1
+    else:
+        block_factor = max(len(block_names), 1)
+
+    return per_block * len(query.datatypes) * block_factor
+
+
+def estimate_result_bytes(
+    query: QueryIn, schema: SchemaDict, block_names: list[str]
+) -> int:
+    """Estimated serialized size of a /query result (see estimate_result_elements)."""
+    return estimate_result_elements(query, schema, block_names) * BYTES_PER_RESULT_ELEMENT
 
 
 class QueryError(Exception):
@@ -110,6 +194,31 @@ def _free_coords(da: xr.DataArray, exclude: str | None = None) -> list[tuple[str
     return out
 
 
+def _safe_sel(
+    da: xr.DataArray, applicable: dict[str, str | list[str]]
+) -> xr.DataArray:
+    """``da.sel(applicable)``, raising a QueryError that names bad labels.
+
+    xarray's own KeyError only says "not all values found"; we pinpoint which
+    value(s) aren't valid labels so the error is actionable. A selection value
+    may be a scalar or a list; each element is checked.
+    """
+    try:
+        return da.sel(applicable)
+    except KeyError as e:
+        missing = []
+        for dim, val in applicable.items():
+            valid = {str(x) for x in da.coords[dim].values.tolist()}
+            for v in val if isinstance(val, list) else [val]:
+                if str(v) not in valid:
+                    missing.append(f"{dim}={v!r}")
+        if missing:
+            raise QueryError(
+                f"Selection value(s) not found in dataset: {', '.join(missing)}"
+            ) from e
+        raise QueryError(f"Selection error: {e}") from e
+
+
 def _read_datatype_from_ds(
     ds: xr.Dataset,
     datatype: str,
@@ -135,24 +244,8 @@ def _read_datatype_from_ds(
     # ["Timepoint"]) simply don't vary along the dims they omit, so fixing such
     # a dim is a no-op for them rather than an error.
     applicable = {k: v for k, v in array_selections.items() if k in da.dims}
-    try:
-        if applicable:
-            da = da.sel(applicable)
-    except KeyError as e:
-        # Pinpoint which value(s) aren't valid labels so the error is
-        # actionable — xarray's default only says "not all values found". A
-        # selection value may be a scalar or a list; check each element.
-        missing = []
-        for dim, val in applicable.items():
-            valid = {str(x) for x in da.coords[dim].values.tolist()}
-            for v in val if isinstance(val, list) else [val]:
-                if str(v) not in valid:
-                    missing.append(f"{dim}={v!r}")
-        if missing:
-            raise QueryError(
-                f"Selection value(s) not found in dataset: {', '.join(missing)}"
-            ) from e
-        raise QueryError(f"Selection error: {e}") from e
+    if applicable:
+        da = _safe_sel(da, applicable)
 
     arr = da.values
 
@@ -254,6 +347,112 @@ def _align_blocks(
         da = da.reindex({dim: union[dim] for dim in dims}, fill_value=np.nan)  # type: ignore[arg-type]
         aligned.append(da.values)
     return aligned, [(dim, union[dim]) for dim in dims]
+
+
+def _apply_filter_op(
+    da: xr.DataArray, op: str, value: float | str | list[float | str]
+) -> xr.DataArray:
+    """Return a boolean DataArray (same dims as ``da``) of cells passing the op.
+
+    NaN never satisfies a comparison, so NaN cells are excluded automatically.
+    """
+    if op == "gt":
+        return da > value
+    if op == "lt":
+        return da < value
+    if op == "ge":
+        return da >= value
+    if op == "le":
+        return da <= value
+    if op == "eq":
+        return da == value
+    if op == "in":
+        return da.isin(value)  # type: ignore[arg-type]
+    raise QueryError(f"Unknown filter op: {op}")
+
+
+def _cells_to_json(arr_1d: np.ndarray) -> list[str | int | float | None]:
+    """Per-cell JSON values, mapping NaN (float or object dtype) to None."""
+    out: list[str | int | float | None] = []
+    for v in arr_1d.tolist():
+        if isinstance(v, float) and np.isnan(v):
+            out.append(None)
+        else:
+            out.append(v)
+    return out
+
+
+# One block's filter result: the free dims (axis order), a coord-labels list per
+# free dim, a values list per returned datatype, and the TRUE passing-cell count
+# before any cap (coords/values themselves are capped; raw_count lets the caller
+# detect truncation).
+FilterBlockResult = tuple[
+    list[str], dict[str, list[str]], dict[str, list[str | int | float | None]], int
+]
+
+
+def _filter_one_block(
+    ds: xr.Dataset,
+    filt: Filter,
+    return_dts: list[str],
+    array_selections: dict[str, str | list[str]],
+    cap: int,
+) -> FilterBlockResult:
+    """Apply ``filt`` to one opened block and gather the passing cells.
+
+    Fixed ``select`` dims are applied first (scalars collapse, lists subset).
+    The predicate on ``filt.datatype`` yields a mask; every returned datatype is
+    then read out at the passing cells. At most ``cap`` cells are materialized.
+    """
+    if filt.datatype not in ds:
+        raise QueryError(f"Datatype '{filt.datatype}' not found in block")
+
+    da = ds[filt.datatype]
+    applicable = {k: v for k, v in array_selections.items() if k in da.dims}
+    if applicable:
+        da = _safe_sel(da, applicable)
+
+    mask = _apply_filter_op(da, filt.op, filt.value)
+    free_dims = [str(d) for d in da.dims]
+
+    def read_other(dt: str) -> np.ndarray:
+        if dt == filt.datatype:
+            base = da
+        else:
+            if dt not in ds:
+                raise QueryError(f"Datatype '{dt}' not found in block")
+            other = ds[dt]
+            appl = {k: v for k, v in applicable.items() if k in other.dims}
+            base = _safe_sel(other, appl) if appl else other
+        # Match the mask's axis order so flat index tuples line up.
+        return np.asarray(base.transpose(*da.dims).values)
+
+    # Scalar case: everything was fixed by select, so the mask is 0-d.
+    if da.ndim == 0:
+        passing = bool(np.asarray(mask.values))
+        n = 1 if passing else 0
+        values = {
+            dt: (_cells_to_json(read_other(dt).reshape(1)) if passing else [])
+            for dt in return_dts
+        }
+        return [], {}, values, n
+
+    idx = np.argwhere(np.asarray(mask.values))  # (n_pass, ndim), row-major order
+    raw_count = idx.shape[0]
+    if raw_count > cap:
+        idx = idx[:cap]  # bound per-block memory; caller flags truncation
+
+    coords: dict[str, list[str]] = {}
+    for axis, d in enumerate(free_dims):
+        if d in da.coords:
+            labels = np.asarray(da.coords[d].values)
+            coords[d] = [str(labels[i]) for i in idx[:, axis]]
+        else:
+            coords[d] = [str(i) for i in idx[:, axis]]
+
+    picks = tuple(idx[:, axis] for axis in range(idx.shape[1]))
+    values = {dt: _cells_to_json(read_other(dt)[picks]) for dt in return_dts}
+    return free_dims, coords, values, raw_count
 
 
 class QueryService:
@@ -361,6 +560,112 @@ class QueryService:
 
         return self._multi_block_response(
             all_results, target_blocks, query.datatypes, last_dim,
+        )
+
+    def execute_filter(
+        self,
+        spec: FilterIn,
+        schema: SchemaDict,
+        block_names: list[str],
+        get_block_path: Callable[[str], Path],
+    ) -> FilterOut:
+        """Return the cells of a datatype that pass a predicate, with coords.
+
+        Results are tidy/long: one record per passing cell. The block key
+        (last dimension) is just another coordinate column, so results span
+        blocks and each record carries its block. Read blocks in parallel.
+        """
+        last_dim = schema["last_dimension"]
+
+        # Same routing rules as execute(): the block key selects a folder (or,
+        # omitted, all folders); everything else is an in-array selection.
+        block_selection: str | None = None
+        array_selections: dict[str, str | list[str]] = {}
+        for sel in spec.select:
+            if sel.dimension == last_dim:
+                if isinstance(sel.value, list):
+                    raise QueryError(
+                        f"A list of values for the block key {last_dim!r} is not "
+                        f"supported; select a single block, or omit it to span all."
+                    )
+                block_selection = sel.value
+            else:
+                array_selections[sel.dimension] = sel.value
+
+        target_blocks = [block_selection] if block_selection else block_names
+
+        # Filtered datatype first, then any extra co-located datatypes to read.
+        return_dts = [spec.filter.datatype]
+        for dt in spec.datatypes:
+            if dt not in return_dts:
+                return_dts.append(dt)
+
+        cap = min(spec.limit, MAX_FILTER_ROWS) if spec.limit else MAX_FILTER_ROWS
+
+        if not target_blocks:
+            return FilterOut(
+                dimensions=[], coords={}, data={dt: [] for dt in return_dts},
+                count=0, truncated=False,
+            )
+
+        def _run(block_name: str) -> FilterBlockResult:
+            block_path = get_block_path(block_name)
+            try:
+                ds = xr.open_zarr(str(block_path))
+                try:
+                    return _filter_one_block(
+                        ds, spec.filter, return_dts, array_selections, cap,
+                    )
+                finally:
+                    ds.close()
+            except QueryError:
+                raise
+            except Exception as e:
+                raise QueryError(f"Failed reading block {block_name!r}: {e}") from e
+
+        if len(target_blocks) == 1:
+            per_block = [(target_blocks[0], _run(target_blocks[0]))]
+        else:
+            results = self.executor.map(_run, target_blocks)
+            per_block = list(zip(target_blocks, results, strict=True))
+
+        # Concatenate block results into parallel columns; the block key becomes
+        # a coordinate column (Screen), so cross-block results stay attributable.
+        dims_out: list[str] = []
+        coords_out: dict[str, list[str]] = {}
+        data_out: dict[str, list[str | int | float | None]] = {dt: [] for dt in return_dts}
+        total = 0
+        truncated = False
+
+        for block_name, (free_dims, coords, values, raw_count) in per_block:
+            if not dims_out and free_dims:
+                dims_out = free_dims
+                coords_out = {d: [] for d in free_dims}
+                coords_out[last_dim] = []
+            elif last_dim not in coords_out:
+                coords_out[last_dim] = []
+
+            available = len(values[return_dts[0]])  # already capped to `cap`
+            take = min(available, cap - total)
+            if take < raw_count:  # per-block or global cap cut this block short
+                truncated = True
+            if take <= 0:
+                continue
+
+            for d in dims_out:
+                coords_out[d].extend(coords[d][:take])
+            coords_out[last_dim].extend([block_name] * take)
+            for dt in return_dts:
+                data_out[dt].extend(values[dt][:take])
+            total += take
+
+        dimensions = [*dims_out, last_dim] if (dims_out or total) else []
+        return FilterOut(
+            dimensions=dimensions,
+            coords=coords_out if dimensions else {},
+            data=data_out,
+            count=total,
+            truncated=truncated,
         )
 
     def _aggregate_across_blocks(

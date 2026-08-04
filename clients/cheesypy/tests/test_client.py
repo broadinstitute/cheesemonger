@@ -91,6 +91,105 @@ def test_diagonal_sends_dims():
     assert captured["body"]["diagonal"] == ["Target", "Response"]
 
 
+def test_filter_builds_request_and_returns_tidy_frame():
+    captured = {}
+
+    def handler(request):
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "dimensions": ["Response", "Screen"],
+            "coords": {"Response": ["10", "100"], "Screen": ["S1", "S1"]},
+            "data": {"Correlation": [0.82, 0.91], "CorrelateResponse": ["7157", "1234"]},
+            "count": 2,
+            "truncated": False,
+        })
+
+    cm = make_client(handler)
+    out = cm.filter("ds", "Correlation", ">", 0.75, datatypes=["CorrelateResponse"])
+
+    assert captured["path"] == "/datasets/ds/filter"
+    assert captured["body"]["filter"] == {"datatype": "Correlation", "op": "gt", "value": 0.75}
+    assert captured["body"]["datatypes"] == ["CorrelateResponse"]
+    assert isinstance(out, pd.DataFrame)
+    assert list(out.columns) == ["Response", "Screen", "Correlation", "CorrelateResponse"]
+    assert out["Correlation"].tolist() == [0.82, 0.91]
+    assert len(out) == 2
+
+
+def test_filter_in_op_and_select():
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "dimensions": ["Response", "Screen"],
+            "coords": {"Response": ["10"], "Screen": ["S1"]},
+            "data": {"CorrelateResponse": ["10"]},
+            "count": 1, "truncated": False,
+        })
+
+    cm = make_client(handler)
+    cm.filter("ds", "CorrelateResponse", "in", ["10", "20"],
+              select={"Screen": "S1"}, limit=100)
+    assert captured["body"]["filter"] == {
+        "datatype": "CorrelateResponse", "op": "in", "value": ["10", "20"],
+    }
+    assert captured["body"]["limit"] == 100
+    assert {"dimension": "Screen", "value": "S1"} in captured["body"]["select"]
+
+
+def test_filter_unknown_op_raises():
+    cm = make_client(lambda request: httpx.Response(200, json={}))
+    with pytest.raises(QueryError, match="Unknown filter op"):
+        cm.filter("ds", "Correlation", "!!", 0.5)
+
+
+def test_filter_relabels_coords_and_string_data_to_symbols():
+    def handler(request):
+        if request.url.path == "/gene_mappings":
+            return httpx.Response(200, json={"entries": {"7157": "TP53", "4193": "MDM2"}})
+        return httpx.Response(200, json={
+            "dimensions": ["Response", "Screen"],
+            "coords": {"Response": ["7157", "4193"], "Screen": ["S1", "S1"]},
+            "data": {"Correlation": [0.9, 0.8], "CorrelateResponse": ["4193", "7157"]},
+            "count": 2, "truncated": False,
+        })
+
+    cm = make_client(handler, gene_symbols=True)
+    out = cm.filter("ds", "Correlation", ">", 0.5, datatypes=["CorrelateResponse"])
+    # Gene coords AND the string data column come back as symbols; floats untouched.
+    assert out["Response"].tolist() == ["TP53", "MDM2"]
+    assert out["CorrelateResponse"].tolist() == ["MDM2", "TP53"]
+    assert out["Correlation"].tolist() == [0.9, 0.8]
+    assert out["Screen"].tolist() == ["S1", "S1"]
+
+
+def test_filter_hints_when_symbol_untranslated():
+    def handler(request):
+        if request.url.path == "/gene_mappings":
+            return httpx.Response(200, json={"entries": {"7157": "TP53"}})
+        return httpx.Response(422, json={
+            "detail": "Selection value(s) not found in dataset: CorrelateResponse='BOGUS'"
+        })
+
+    cm = make_client(handler, gene_symbols=True)
+    with pytest.raises(QueryError, match="not recognized as a gene symbol"):
+        cm.filter("ds", "CorrelateResponse", "in", ["TP53", "BOGUS"])
+
+
+def test_result_too_large_maps_to_query_error():
+    def handler(request):
+        return httpx.Response(413, json={
+            "detail": "Query result too large: estimated 1.58 GB (~65,750,400 values) "
+                      "exceeds the 1.00 GB limit. Narrow the query — ..."
+        })
+
+    cm = make_client(handler)
+    with pytest.raises(QueryError, match="too large"):
+        cm.series("ds", "ZScore", screen="S1")
+
+
 def test_raw_returns_dict():
     payload = {
         "blocks": ["S1"], "aggregation": None, "shape": [1],

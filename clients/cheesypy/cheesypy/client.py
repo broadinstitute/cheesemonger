@@ -8,7 +8,13 @@ import httpx
 import pandas as pd
 
 from .exceptions import CheesemongerError, DatasetNotFound, QueryError
-from .reshape import response_to_pandas
+from .reshape import filter_to_pandas, response_to_pandas
+
+# User-facing operator spellings mapped to the wire op codes.
+_FILTER_OPS = {
+    ">": "gt", "<": "lt", "=": "eq", "==": "eq", ">=": "ge", "<=": "le", "in": "in",
+    "gt": "gt", "lt": "lt", "eq": "eq", "ge": "ge", "le": "le",
+}
 
 
 class Cheesemonger:
@@ -69,7 +75,9 @@ class Cheesemonger:
                 detail = resp.text
             if resp.status_code == 404:
                 raise DatasetNotFound(detail, status_code=404)
-            if resp.status_code in (400, 422):
+            # 413 = result too large (query size cap); surface it like other
+            # query-level problems so callers catch it with QueryError.
+            if resp.status_code in (400, 413, 422):
                 raise QueryError(detail, status_code=resp.status_code)
             raise CheesemongerError(detail, status_code=resp.status_code)
         return resp.json()
@@ -141,6 +149,24 @@ class Cheesemonger:
         assert self._id2sym is not None
         for level in resp["index"]:
             level["labels"] = [self._id2sym.get(str(lbl), lbl) for lbl in level["labels"]]
+
+    def _relabel_filter(self, resp: dict) -> None:
+        # Relabel gene ids to symbols in coordinate columns AND string-valued data
+        # columns (e.g. CorrelateResponse), so the flagship `CorrelateResponse in
+        # [symbols]` round-trips symbols in and symbols out. Non-gene labels pass
+        # through unchanged. (Caveat: a numeric non-gene label that collides with
+        # an entrez id — e.g. a small-integer Rank/Timepoint — is relabeled too;
+        # this is the same limitation as query()'s index relabeling.)
+        if not self._gene_symbols:
+            return
+        self._ensure_maps()
+        assert self._id2sym is not None
+        for dim, labels in resp["coords"].items():
+            resp["coords"][dim] = [self._id2sym.get(str(lbl), lbl) for lbl in labels]
+        for dt, vals in resp["data"].items():
+            resp["data"][dt] = [
+                self._id2sym.get(v, v) if isinstance(v, str) else v for v in vals
+            ]
 
     # --- read ------------------------------------------------------------
 
@@ -267,3 +293,89 @@ class Cheesemonger:
     ) -> Any:
         """Diagonal query: values where the two ``dims`` share a coordinate label."""
         return self.query(dataset, datatype, select=select or None, diagonal=dims, raw=raw)
+
+    def filter(
+        self,
+        dataset: str,
+        datatype: str,
+        op: str,
+        value: float | int | str | list[float | int | str],
+        *,
+        datatypes: list[str] | None = None,
+        select: dict[str, int | str | list[int | str]] | None = None,
+        limit: int | None = None,
+        raw: bool = False,
+    ) -> Any:
+        """Return the cells of ``datatype`` passing a predicate, with coords.
+
+        Runs the comparison server-side (POST /datasets/{dataset}/filter) and
+        returns a tidy DataFrame: one row per passing cell, columns are the
+        coordinate dimensions (including the block key) then the datatypes.
+
+        Args:
+            op: one of ``>``, ``<``, ``=``, ``>=``, ``<=``, ``in`` (or the wire
+                codes ``gt/lt/eq/ge/le/in``).
+            value: threshold for the ordering/equality ops; a list for ``in``.
+                Gene symbols are translated to entrez ids (like ``select``).
+            datatypes: extra co-located datatypes to read at the passing cells
+                (must share the filtered datatype's dimensions). The filtered
+                datatype is always included.
+            select: fixed selections applied before filtering (see ``query``).
+            limit: cap on returned rows (the server also enforces a hard cap).
+
+        Example:
+            >>> cm.filter("ps100_response_corr", "Correlation", ">", 0.75,
+            ...           datatypes=["CorrelateResponse"])
+        """
+        op_code = _FILTER_OPS.get(op)
+        if op_code is None:
+            raise QueryError(
+                f"Unknown filter op {op!r}; use one of >, <, =, >=, <=, in."
+            )
+
+        # Track symbols we couldn't translate (sent as-is) so a server rejection
+        # can be explained — same courtesy as query().
+        untranslated: list[tuple[str, int | str]] = []
+
+        def _note_untranslated(dim: str, val: Any) -> None:
+            if self._gene_symbols and self._sym2id is not None:
+                for v in val if isinstance(val, (list, tuple)) else [val]:
+                    if str(v) not in self._sym2id:
+                        untranslated.append((dim, v))
+
+        # Translate gene symbol(s) to ids for string/list values; numbers (a
+        # numeric threshold) pass through untouched.
+        if isinstance(value, (str, list, tuple)):
+            wire_value = self._to_ids(value)
+            _note_untranslated(datatype, value)
+        else:
+            wire_value = value
+
+        body: dict[str, Any] = {
+            "filter": {"datatype": datatype, "op": op_code, "value": wire_value},
+            "datatypes": list(datatypes or []),
+        }
+        if select:
+            sel: list[dict[str, Any]] = []
+            for dim, val in select.items():
+                sel.append({"dimension": dim, "value": self._to_ids(val)})
+                _note_untranslated(dim, val)
+            body["select"] = sel
+        if limit is not None:
+            body["limit"] = limit
+
+        try:
+            resp = self._request("POST", f"/datasets/{dataset}/filter", json=body)
+        except QueryError as e:
+            bad = [f"{dim}={val!r}" for dim, val in untranslated if str(val) in str(e)]
+            if bad:
+                raise QueryError(
+                    f"{e} — {', '.join(bad)} not recognized as a gene symbol, so it was "
+                    f"sent as-is. Look up valid symbols with cm.gene_mappings().",
+                    status_code=e.status_code,
+                ) from e
+            raise
+        if raw:
+            return resp
+        self._relabel_filter(resp)
+        return filter_to_pandas(resp)

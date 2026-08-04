@@ -81,6 +81,39 @@ def _query(client, body: dict):
 # --- Happy paths -----------------------------------------------------------
 
 
+def test_query_over_size_cap_returns_413(client, settings, db):
+    """A result estimated to exceed max_result_bytes is rejected before reading."""
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
+    settings.max_result_bytes = 10  # tiny cap: any real result exceeds it
+
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+        ],
+    })
+    assert r.status_code == 413, r.text
+    assert "exceeds" in r.json()["detail"]
+
+
+def test_query_under_size_cap_ok(client, settings, db):
+    """A normal result under the cap is served."""
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
+    settings.max_result_bytes = 1_000_000_000
+
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+        ],
+    })
+    assert r.status_code == 200, r.text
+
+
 def test_series_query(client, settings, db):
     """Fix screen+timepoint+perturbation; get the gene-expression vector."""
     _setup(client, settings, db, {"SW620": _block(BASE, BASE)})

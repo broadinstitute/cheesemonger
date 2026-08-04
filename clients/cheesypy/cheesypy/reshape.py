@@ -26,6 +26,21 @@ import pandas as pd
 from .exceptions import CheesemongerError
 
 
+def filter_to_pandas(resp: dict) -> Any:
+    """Turn a /filter response (tidy/long) into a flat DataFrame.
+
+    One row per passing cell; columns are the coordinate dimensions (including
+    the block key) followed by the returned datatypes. Column order follows
+    ``resp["dimensions"]`` then ``resp["data"]``.
+    """
+    cols: dict[str, list] = {}
+    for dim in resp["dimensions"]:
+        cols[dim] = resp["coords"][dim]
+    for dt, vals in resp["data"].items():
+        cols[dt] = vals
+    return pd.DataFrame(cols)
+
+
 def response_to_pandas(resp: dict, datatypes: list[str], single: bool) -> Any:
     index = resp["index"]
     data = resp["data"]

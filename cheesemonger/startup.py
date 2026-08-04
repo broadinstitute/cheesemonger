@@ -12,6 +12,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .api.datasets import router as datasets_router
+from .api.filter import router as filter_router
 from .api.gene_mappings import router as gene_mappings_router
 from .api.health import router as health_router
 from .api.query import router as query_router
@@ -85,6 +86,7 @@ def create_app(settings: Settings) -> FastAPI:
     root_router.include_router(datasets_router)
     root_router.include_router(gene_mappings_router)
     root_router.include_router(query_router)
+    root_router.include_router(filter_router)
 
     app.include_router(root_router)
 

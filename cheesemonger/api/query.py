@@ -14,7 +14,13 @@ from cheesemonger.crud import dataset as ds_crud
 from cheesemonger.db import get_db
 from cheesemonger.schemas.query import THRESHOLD_AGGREGATIONS, QueryIn, QueryOut
 from cheesemonger.services import dataset as ds_paths
-from cheesemonger.services.query import QueryError, QueryService
+from cheesemonger.services.query import (
+    BYTES_PER_RESULT_ELEMENT,
+    QueryError,
+    QueryService,
+    estimate_result_elements,
+    human_bytes,
+)
 
 from .deps import get_query_service
 
@@ -127,6 +133,21 @@ def query_data(
                 status_code=404,
                 detail=f"Block '{block_name}' not found in dataset '{dataset}'",
             )
+
+    # Reject an oversized result before reading any data. The shape is known from
+    # the schema + selections, so we can estimate the serialized size up front.
+    elements = estimate_result_elements(query, schema, block_names)
+    est_bytes = elements * BYTES_PER_RESULT_ELEMENT
+    if est_bytes > settings.max_result_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Query result too large: estimated {human_bytes(est_bytes)} "
+                f"(~{elements:,} values) exceeds the "
+                f"{human_bytes(settings.max_result_bytes)} limit. Narrow the query — "
+                f"fix more dimensions, aggregate over a dimension, or select fewer labels."
+            ),
+        )
 
     try:
         return qs.execute(
