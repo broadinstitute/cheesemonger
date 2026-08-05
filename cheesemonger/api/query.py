@@ -103,10 +103,19 @@ def query_data(
             )
         selected_dims = {s.dimension for s in query.select}
         if over in selected_dims:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Cannot aggregate over '{over}': it is fixed by select",
+            # A list on the block key names "this subset of screens"; aggregating
+            # over that subset is meaningful (e.g. mean across the chosen screens).
+            # Any other fixed selection genuinely pins the dim, so it can't be
+            # reduced.
+            block_sel_is_list = any(
+                s.dimension == last_dim and isinstance(s.value, list)
+                for s in query.select
             )
+            if not (over == last_dim and block_sel_is_list):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Cannot aggregate over '{over}': it is fixed by select",
+                )
         if over != last_dim and over not in queried_dims:
             raise HTTPException(
                 status_code=422,
@@ -117,21 +126,32 @@ def query_data(
             )
 
     block_names = ds_crud.list_block_names(db, dataset)
+    block_name_set = set(block_names)
     block_sel = next((s for s in query.select if s.dimension == last_dim), None)
     if block_sel:
+        # The block key may be a single value (one block, dim collapsed) or a
+        # list (a subset of blocks, dim kept). Validate every requested block
+        # exists so callers get a clean 404 instead of a read failure.
         if isinstance(block_sel.value, list):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"A list of values for the block key '{last_dim}' is not "
-                    f"supported; select a single block, or omit it to span all."
-                ),
-            )
-        block_name = str(block_sel.value)
-        if block_name not in block_names:
+            if not block_sel.value:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Empty list for the block key '{last_dim}'; omit it to "
+                        f"span all blocks, or list one or more block names."
+                    ),
+                )
+            requested = block_sel.value
+        else:
+            requested = [str(block_sel.value)]
+        missing = [b for b in requested if b not in block_name_set]
+        if missing:
             raise HTTPException(
                 status_code=404,
-                detail=f"Block '{block_name}' not found in dataset '{dataset}'",
+                detail=(
+                    f"Block(s) not found in dataset '{dataset}': "
+                    f"{', '.join(repr(b) for b in missing)}"
+                ),
             )
 
     # Reject an oversized result before reading any data. The shape is known from

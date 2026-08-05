@@ -69,9 +69,12 @@ def estimate_result_elements(
     scalar_fixed: set[str] = set()
     list_sizes: dict[str, int] = {}
     block_selection: str | None = None
+    block_list_size: int | None = None
     for sel in query.select:
         if sel.dimension == last_dim:
-            if not isinstance(sel.value, list):
+            if isinstance(sel.value, list):
+                block_list_size = len(sel.value)
+            else:
                 block_selection = sel.value
         elif isinstance(sel.value, list):
             list_sizes[sel.dimension] = len(sel.value)
@@ -97,7 +100,11 @@ def estimate_result_elements(
                 per_block *= max(len(dim_labels.get(d, [])), 1)
 
     if agg_over == last_dim or block_selection is not None:
+        # Aggregating over blocks collapses them to one; a scalar fixes one block.
         block_factor = 1
+    elif block_list_size is not None:
+        # A subset of blocks kept as a dimension.
+        block_factor = max(block_list_size, 1)
     else:
         block_factor = max(len(block_names), 1)
 
@@ -488,20 +495,29 @@ class QueryService:
         # match the string coordinate labels — see loader._stringify_coords). A
         # list value keeps its dimension in the result (xarray .sel(list)); a
         # scalar collapses it.
-        block_selection: str | None = None
+        #
+        # The block key routes to folders rather than an array axis, but follows
+        # the same collapse-vs-keep rule as any other dimension:
+        #   omitted -> span every block, block dim KEPT (spanning result)
+        #   scalar  -> exactly one block, block dim COLLAPSED (fixed)
+        #   list    -> a subset of blocks, block dim KEPT in requested order
+        block_selection: str | list[str] | None = None
         array_selections: dict[str, str | list[str]] = {}
         for sel in query.select:
             if sel.dimension == last_dim:
-                if isinstance(sel.value, list):
-                    raise QueryError(
-                        f"A list of values for the block key {last_dim!r} is not "
-                        f"supported; select a single block, or omit it to span all."
-                    )
                 block_selection = sel.value
             else:
                 array_selections[sel.dimension] = sel.value
 
-        target_blocks = [block_selection] if block_selection else block_names
+        if isinstance(block_selection, list):
+            target_blocks = block_selection
+            keep_block_dim = True
+        elif block_selection is not None:
+            target_blocks = [block_selection]
+            keep_block_dim = False
+        else:
+            target_blocks = block_names
+            keep_block_dim = True
 
         if not target_blocks:
             return QueryOut(blocks=[], shape=[], index=[], data={})
@@ -553,7 +569,9 @@ class QueryService:
                 all_results, target_blocks, query.datatypes, query.aggregate,
             )
 
-        if len(target_blocks) == 1:
+        # A scalar block selection collapses the block dim (one folder, fixed);
+        # a list or an omitted key keeps it, even if only one block is targeted.
+        if not keep_block_dim:
             return self._single_block_response(
                 all_results, target_blocks, query.datatypes,
             )
@@ -577,22 +595,24 @@ class QueryService:
         """
         last_dim = schema["last_dimension"]
 
-        # Same routing rules as execute(): the block key selects a folder (or,
-        # omitted, all folders); everything else is an in-array selection.
-        block_selection: str | None = None
+        # Same routing rules as execute(): the block key selects a folder, a
+        # subset of folders (list), or — omitted — all folders. Everything else
+        # is an in-array selection. Filter output is tidy with the block key as a
+        # coordinate column, so the block dim is always present regardless.
+        block_selection: str | list[str] | None = None
         array_selections: dict[str, str | list[str]] = {}
         for sel in spec.select:
             if sel.dimension == last_dim:
-                if isinstance(sel.value, list):
-                    raise QueryError(
-                        f"A list of values for the block key {last_dim!r} is not "
-                        f"supported; select a single block, or omit it to span all."
-                    )
                 block_selection = sel.value
             else:
                 array_selections[sel.dimension] = sel.value
 
-        target_blocks = [block_selection] if block_selection else block_names
+        if isinstance(block_selection, list):
+            target_blocks = block_selection
+        elif block_selection is not None:
+            target_blocks = [block_selection]
+        else:
+            target_blocks = block_names
 
         # Filtered datatype first, then any extra co-located datatypes to read.
         return_dts = [spec.filter.datatype]

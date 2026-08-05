@@ -250,13 +250,35 @@ def test_filter_extra_datatype_must_share_dims(client, settings, db):
     assert r.status_code == 422, r.text
 
 
-def test_filter_block_key_list_rejected(client, settings, db):
+def test_filter_block_key_list_selects_subset(client, settings, db):
+    """A list on the block key filters just those blocks; the block key remains a
+    coordinate column so records stay attributable to their screen."""
+    _setup(settings, db, {
+        "SW620": _block(BASE),           # max ZScore 23
+        "HCT116": _block(BASE + 100),    # 100..123
+        "A549": _block(BASE + 200),      # 200..223 — excluded by the subset
+    })
+    r = _filter(client, {
+        "filter": {"datatype": "ZScore", "op": "gt", "value": 120},
+        "select": [{"dimension": "screen", "value": ["SW620", "HCT116"]}],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Only HCT116 has values > 120 within the subset; A549 (200s) is excluded.
+    assert body["count"] == 3
+    assert set(body["coords"]["screen"]) == {"HCT116"}
+    assert body["data"]["ZScore"] == [121.0, 122.0, 123.0]
+    assert "screen" in body["dimensions"]
+
+
+def test_filter_block_key_list_unknown_block_404(client, settings, db):
     _setup(settings, db, {"SW620": _block(BASE), "HCT116": _block(BASE)})
     r = _filter(client, {
         "filter": {"datatype": "ZScore", "op": "gt", "value": 1},
-        "select": [{"dimension": "screen", "value": ["SW620", "HCT116"]}],
+        "select": [{"dimension": "screen", "value": ["SW620", "NOPE"]}],
     })
-    assert r.status_code == 422, r.text
+    assert r.status_code == 404, r.text
+    assert "NOPE" in r.json()["detail"]
 
 
 def test_filter_dataset_not_found(client, settings, db):

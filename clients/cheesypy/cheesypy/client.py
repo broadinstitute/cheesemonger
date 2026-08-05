@@ -186,9 +186,10 @@ class Cheesemonger:
             datatype: One datatype name, or a list for a multi-datatype batch.
             select: ``{dimension: value}`` fixed selections. A value may be a
                 single label (fixes the dim, dropping it from the result) or a
-                list of labels (keeps the dim, in the given order). Include the
-                block key (e.g. ``screen``) here — as a single value — to target
-                one block; omit it to span all blocks.
+                list of labels (keeps the dim, in the given order). The block key
+                (e.g. ``screen``) follows the same rule: a single value targets
+                one block (dropping the block dim), a list selects that subset of
+                blocks (keeping the block dim), and omitting it spans all blocks.
             aggregate: ``{"type": "mean"|"median"|"min"|"max"|"count"|"count_lt"|
                 "count_gt"|"abs_gt", "over": dim, "threshold": x}``. ``threshold``
                 is required for the ``count_lt``/``count_gt``/``abs_gt`` types.

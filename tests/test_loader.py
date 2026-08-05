@@ -100,7 +100,7 @@ def test_loaded_block_is_queryable(tmp_path, loader_db):
         QueryIn(
             datatypes=["ZScore"],
             select=[
-                Selection(dimension="screen", value="PS-SC-1"),
+                Selection(dimension="Screen", value="PS-SC-1"),
                 Selection(dimension="Timepoint", value="D4"),
                 Selection(dimension="Target", value="23293"),
             ],
@@ -155,7 +155,7 @@ def test_unbroadcasted_store_loads_and_queries(tmp_path, loader_db):
         QueryIn(
             datatypes=["CtrlMean"],
             select=[
-                Selection(dimension="screen", value="PS-SC-1"),
+                Selection(dimension="Screen", value="PS-SC-1"),
                 Selection(dimension="Timepoint", value="D4"),
                 Selection(dimension="Target", value="23293"),  # not a CtrlMean dim
             ],

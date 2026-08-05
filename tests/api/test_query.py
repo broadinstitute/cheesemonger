@@ -650,11 +650,111 @@ def test_list_selection_unknown_label_422(client, settings, db):
     assert "NOPE" in r.json()["detail"]
 
 
-def test_list_selection_on_block_key_rejected(client, settings, db):
+def test_block_key_list_selects_subset_and_keeps_dim(client, settings, db):
+    """A list on the block key returns just those blocks, in the order given,
+    with the block dim kept in the index (like a subset of screens)."""
+    _setup(client, settings, db, {
+        "SW620": _block(BASE, BASE),
+        "HT29": _block(BASE + 100, BASE + 100),
+        "A549": _block(BASE + 200, BASE + 200),
+    })
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "screen", "value": ["A549", "SW620"]},  # subset, reordered
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["blocks"] == ["A549", "SW620"]
+    assert body["index"][0]["dimension"] == "screen"
+    assert body["index"][0]["labels"] == ["A549", "SW620"]  # HT29 excluded, order kept
+    assert body["shape"] == [2, 4]
+    rows = dict(zip(body["index"][0]["labels"], body["data"]["ZScore"], strict=True))
+    assert rows["A549"] == [200.0, 201.0, 202.0, 203.0]
+    assert rows["SW620"] == [0.0, 1.0, 2.0, 3.0]
+
+
+def test_block_key_single_element_list_keeps_dim(client, settings, db):
+    """A one-element list still KEEPS the block dim (unlike a scalar, which
+    collapses it) — list semantics are about keeping the dimension, not count."""
     _setup(client, settings, db, {"SW620": _block(BASE, BASE), "HT29": _block(BASE, BASE)})
     r = _query(client, {
         "datatypes": ["ZScore"],
-        "select": [{"dimension": "screen", "value": ["SW620", "HT29"]}],
+        "select": [
+            {"dimension": "screen", "value": ["SW620"]},
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["index"][0]["dimension"] == "screen"
+    assert body["index"][0]["labels"] == ["SW620"]
+    assert body["shape"] == [1, 4]
+
+
+def test_block_key_scalar_still_collapses_dim(client, settings, db):
+    """Contrast: a scalar block selection collapses the block dim (no screen
+    level in the index) even when other blocks exist."""
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE), "HT29": _block(BASE, BASE)})
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [lvl["dimension"] for lvl in body["index"]] == ["testedgeneexpression"]
+    assert body["shape"] == [4]
+
+
+def test_block_key_list_aggregate_over_subset(client, settings, db):
+    """Aggregating over the block key with a subset list reduces across just
+    those screens (not all of them)."""
+    _setup(client, settings, db, {
+        "SW620": _block(BASE, BASE),           # timepoint4/pert103 -> [0,1,2,3]
+        "HT29": _block(BASE + 100, BASE + 100),  # -> [100,101,102,103]
+        "A549": _block(BASE + 200, BASE + 200),  # -> [200,201,202,203]
+    })
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "screen", "value": ["SW620", "HT29"]},  # A549 excluded
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+        ],
+        "aggregate": {"type": "mean", "over": "screen"},
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["aggregation"] == "mean"
+    # screen collapsed; mean over SW620 & HT29 only: (0+100)/2 ... = [50,51,52,53]
+    assert [lvl["dimension"] for lvl in body["index"]] == ["testedgeneexpression"]
+    assert body["data"]["ZScore"] == [50.0, 51.0, 52.0, 53.0]
+
+
+def test_block_key_list_unknown_block_404(client, settings, db):
+    """If any block in the list is unknown, the whole request 404s."""
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE), "HT29": _block(BASE, BASE)})
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [{"dimension": "screen", "value": ["SW620", "NOPE"]}],
+    })
+    assert r.status_code == 404, r.text
+    assert "NOPE" in r.json()["detail"]
+
+
+def test_block_key_empty_list_422(client, settings, db):
+    """An empty block-key list is rejected (ambiguous: omit to span all)."""
+    _setup(client, settings, db, {"SW620": _block(BASE, BASE)})
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [{"dimension": "screen", "value": []}],
     })
     assert r.status_code == 422, r.text
-    assert "block key" in r.json()["detail"].lower()

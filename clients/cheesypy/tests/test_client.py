@@ -52,6 +52,34 @@ def test_multi_datatype_returns_dataframe():
     assert list(out.columns) == ["ZScore", "FDR"]
 
 
+def test_block_key_subset_list_is_sent_and_reshaped():
+    """A list value on the block key is forwarded as-is; the multi-block result
+    (block dim kept) reshapes with the block key as an index level."""
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "blocks": ["S1", "S2"], "aggregation": None, "shape": [2, 2],
+            "index": [
+                {"dimension": "screen", "labels": ["S1", "S2"]},
+                {"dimension": "Response", "labels": ["a", "b"]},
+            ],
+            "data": {"ZScore": [[1.0, 2.0], [3.0, 4.0]]},
+        })
+
+    cm = make_client(handler)
+    out = cm.query("ds", "ZScore", select={"screen": ["S1", "S2"], "Target": "23293"})
+
+    # The list is forwarded untouched on the block key.
+    assert {"dimension": "screen", "value": ["S1", "S2"]} in captured["body"]["select"]
+    # 2 free dims (screen x Response) -> DataFrame indexed by the block key.
+    assert isinstance(out, pd.DataFrame)
+    assert list(out.index) == ["S1", "S2"]
+    assert list(out.columns) == ["a", "b"]
+    assert out.loc["S2", "b"] == 4.0
+
+
 def test_aggregate_sends_spec():
     captured = {}
 

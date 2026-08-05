@@ -72,21 +72,31 @@ def filter_data(
             )
 
     block_names = ds_crud.list_block_names(db, dataset)
+    block_name_set = set(block_names)
     block_sel = next((s for s in spec.select if s.dimension == last_dim), None)
     if block_sel:
+        # The block key may be a single value, a subset (list), or omitted (all).
+        # Validate every requested block exists for a clean 404.
         if isinstance(block_sel.value, list):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"A list of values for the block key '{last_dim}' is not "
-                    f"supported; select a single block, or omit it to span all."
-                ),
-            )
-        block_name = str(block_sel.value)
-        if block_name not in block_names:
+            if not block_sel.value:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Empty list for the block key '{last_dim}'; omit it to "
+                        f"span all blocks, or list one or more block names."
+                    ),
+                )
+            requested = block_sel.value
+        else:
+            requested = [str(block_sel.value)]
+        missing = [b for b in requested if b not in block_name_set]
+        if missing:
             raise HTTPException(
                 status_code=404,
-                detail=f"Block '{block_name}' not found in dataset '{dataset}'",
+                detail=(
+                    f"Block(s) not found in dataset '{dataset}': "
+                    f"{', '.join(repr(b) for b in missing)}"
+                ),
             )
 
     try:
