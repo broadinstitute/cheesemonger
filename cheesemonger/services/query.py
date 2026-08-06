@@ -356,25 +356,27 @@ def _align_blocks(
     return aligned, [(dim, union[dim]) for dim in dims]
 
 
-def _apply_filter_op(
-    da: xr.DataArray, op: str, value: float | str | list[float | str]
-) -> xr.DataArray:
-    """Return a boolean DataArray (same dims as ``da``) of cells passing the op.
+def _apply_filter_op_np(
+    arr: np.ndarray, op: str, value: float | str | list[float | str]
+) -> np.ndarray:
+    """Return a boolean array (same shape as ``arr``) of cells passing the op.
 
-    NaN never satisfies a comparison, so NaN cells are excluded automatically.
+    Evaluated in numpy on the already-read array so the filtered datatype is read
+    exactly once (predicate + value gather share it). NaN never satisfies a
+    comparison, so NaN cells are excluded automatically.
     """
     if op == "gt":
-        return da > value
+        return arr > value
     if op == "lt":
-        return da < value
+        return arr < value
     if op == "ge":
-        return da >= value
+        return arr >= value
     if op == "le":
-        return da <= value
+        return arr <= value
     if op == "eq":
-        return da == value
+        return arr == value
     if op == "in":
-        return da.isin(value)  # type: ignore[arg-type]
+        return np.isin(arr, value)
     raise QueryError(f"Unknown filter op: {op}")
 
 
@@ -409,7 +411,13 @@ def _filter_one_block(
 
     Fixed ``select`` dims are applied first (scalars collapse, lists subset).
     The predicate on ``filt.datatype`` yields a mask; every returned datatype is
-    then read out at the passing cells. At most ``cap`` cells are materialized.
+    then read out AT the passing cells only. At most ``cap`` cells are kept.
+
+    The filtered datatype is read once (its whole array is needed to evaluate the
+    predicate) and reused to gather its passing values. Co-located datatypes are
+    read pointwise via ``isel`` at the passing positions, so Zarr materializes
+    only the chunks holding those cells instead of the entire cube — the win that
+    makes a small ``limit`` cheap even on a large datatype.
     """
     if filt.datatype not in ds:
         raise QueryError(f"Datatype '{filt.datatype}' not found in block")
@@ -419,32 +427,43 @@ def _filter_one_block(
     if applicable:
         da = _safe_sel(da, applicable)
 
-    mask = _apply_filter_op(da, filt.op, filt.value)
     free_dims = [str(d) for d in da.dims]
 
-    def read_other(dt: str) -> np.ndarray:
-        if dt == filt.datatype:
-            base = da
-        else:
-            if dt not in ds:
-                raise QueryError(f"Datatype '{dt}' not found in block")
-            other = ds[dt]
-            appl = {k: v for k, v in applicable.items() if k in other.dims}
-            base = _safe_sel(other, appl) if appl else other
-        # Match the mask's axis order so flat index tuples line up.
-        return np.asarray(base.transpose(*da.dims).values)
+    # One full read of the filtered datatype; predicate evaluated in numpy so we
+    # don't read it again to fetch the passing values.
+    arr = np.asarray(da.values)
+    mask = _apply_filter_op_np(arr, filt.op, filt.value)
 
-    # Scalar case: everything was fixed by select, so the mask is 0-d.
-    if da.ndim == 0:
-        passing = bool(np.asarray(mask.values))
+    def select_other(dt: str) -> xr.DataArray:
+        """The co-datatype's DataArray after the same fixed selections.
+
+        Router validation guarantees co-datatypes share the filtered datatype's
+        dimensions, and all variables in the block share coordinate arrays, so
+        positions computed on ``da`` line up with ``other`` by dim name.
+        """
+        if dt not in ds:
+            raise QueryError(f"Datatype '{dt}' not found in block")
+        other = ds[dt]
+        appl = {k: v for k, v in applicable.items() if k in other.dims}
+        return _safe_sel(other, appl) if appl else other
+
+    # Scalar case: everything was fixed by select, so the array is 0-d.
+    if arr.ndim == 0:
+        passing = bool(mask)
         n = 1 if passing else 0
-        values = {
-            dt: (_cells_to_json(read_other(dt).reshape(1)) if passing else [])
-            for dt in return_dts
-        }
+        values: dict[str, list[str | int | float | None]] = {}
+        for dt in return_dts:
+            if not passing:
+                values[dt] = []
+            elif dt == filt.datatype:
+                values[dt] = _cells_to_json(arr.reshape(1))
+            else:
+                values[dt] = _cells_to_json(
+                    np.asarray(select_other(dt).values).reshape(1)
+                )
         return [], {}, values, n
 
-    idx = np.argwhere(np.asarray(mask.values))  # (n_pass, ndim), row-major order
+    idx = np.argwhere(mask)  # (n_pass, ndim), row-major order
     raw_count = idx.shape[0]
     if raw_count > cap:
         idx = idx[:cap]  # bound per-block memory; caller flags truncation
@@ -457,8 +476,20 @@ def _filter_one_block(
         else:
             coords[d] = [str(i) for i in idx[:, axis]]
 
+    # Pointwise indexers keyed by dim name (order-independent). Shared "cells" dim
+    # makes isel gather point i from (dim0=idx[i,0], dim1=idx[i,1], ...) jointly.
+    point_indexers = {
+        d: xr.DataArray(idx[:, axis], dims="cells")
+        for axis, d in enumerate(free_dims)
+    }
     picks = tuple(idx[:, axis] for axis in range(idx.shape[1]))
-    values = {dt: _cells_to_json(read_other(dt)[picks]) for dt in return_dts}
+    values = {}
+    for dt in return_dts:
+        if dt == filt.datatype:
+            values[dt] = _cells_to_json(arr[picks])  # already in memory
+        else:
+            gathered = select_other(dt).isel(point_indexers).values
+            values[dt] = _cells_to_json(np.asarray(gathered))
     return free_dims, coords, values, raw_count
 
 

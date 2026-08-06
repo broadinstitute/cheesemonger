@@ -181,6 +181,29 @@ def test_filter_limit_truncates(client, settings, db):
     assert body["truncated"] is True
 
 
+def test_filter_limit_gathers_codatatype_at_capped_cells(client, settings, db):
+    """Under a limit, a co-located datatype is gathered at exactly the capped
+    passing cells (pointwise), aligning cell-for-cell with the filtered one."""
+    _setup(settings, db, {"SW620": _block(BASE)})
+
+    r = _filter(client, {
+        "filter": {"datatype": "ZScore", "op": "ge", "value": 0},  # every cell passes
+        "datatypes": ["nHits"],
+        "select": [
+            {"dimension": "screen", "value": "SW620"},
+            {"dimension": "timepoint", "value": 4},
+        ],
+        "limit": 3,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 3
+    assert body["truncated"] is True
+    # First 3 passing cells (row-major) at tp4 = flat idx 0,1,2.
+    assert body["data"]["ZScore"] == [0.0, 1.0, 2.0]
+    assert body["data"]["nHits"] == [0, 1, 2]  # co-datatype gathered at the SAME cells
+
+
 def test_filter_preserves_int_dtype(client, settings, db):
     """An integer-valued datatype comes back as ints, not floats."""
     _setup(settings, db, {"SW620": _block(BASE)})
