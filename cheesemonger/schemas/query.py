@@ -39,6 +39,12 @@ class AggregateSpec(BaseModel):
     over: str
     # Required for count_lt / count_gt / abs_gt; ignored by the others.
     threshold: float | None = None
+    # If set, NaN cells are replaced with this constant BEFORE reducing, so a
+    # value that's "missing" (e.g. a gene a screen didn't measure) counts as
+    # fill_value rather than being ignored — e.g. fill_value=0 averages over ALL
+    # screens instead of only the ones that measured the gene. Default None keeps
+    # the NaN-ignoring behavior.
+    fill_value: float | None = None
 
 
 class QueryIn(BaseModel):

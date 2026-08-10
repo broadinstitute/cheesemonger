@@ -584,6 +584,30 @@ def test_multiblock_ragged_aggregation_ignores_nan(client, settings, db):
     assert body["data"]["ZScore"] == [0.0, 1.0, 2.0, 3.0]
 
 
+def test_multiblock_ragged_aggregation_fill_value_zero(client, settings, db):
+    """With fill_value=0, a gene present in only one screen is averaged over ALL
+    screens (missing screens count as 0), not just the screen that has it."""
+    ds_crud.create_dataset(db, DatasetIn(**SCHEMA))
+    _write_block(settings, db, "A", ["103", "226", "672", "7157"])  # 4 genes
+    _write_block(settings, db, "B", ["103", "226"])                 # 2 genes
+    db.commit()
+
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+        ],
+        "aggregate": {"type": "mean", "over": "screen", "fill_value": 0},
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["index"][0]["labels"] == ["103", "226", "672", "7157"]
+    # 103: mean(0,0)=0 ; 226: mean(1,1)=1 ; 672: mean(2,0)=1.0 ; 7157: mean(3,0)=1.5
+    # (contrast test above: NaN-ignore gave [0,1,2,3]; zero-fill dilutes by all screens)
+    assert body["data"]["ZScore"] == [0.0, 1.0, 1.0, 1.5]
+
+
 # --- List-valued selections (keep a dimension, subset its labels) ----------
 
 

@@ -102,6 +102,11 @@ def test_aggregate_sends_spec():
         "type": "count_lt", "over": "Response", "threshold": 0.1,
     }
 
+    cm.aggregate("ds", "ZScore", over="screen", how="mean", fill_value=0, Timepoint="D4")
+    assert captured["body"]["aggregate"] == {
+        "type": "mean", "over": "screen", "fill_value": 0,
+    }
+
 
 def test_diagonal_sends_dims():
     captured = {}

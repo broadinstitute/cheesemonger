@@ -268,6 +268,7 @@ class Cheesemonger:
         over: str,
         how: str = "mean",
         threshold: float | None = None,
+        fill_value: float | None = None,
         raw: bool = False,
         **select: int | str | list[int | str],
     ) -> Any:
@@ -277,10 +278,17 @@ class Cheesemonger:
         ``count_lt``, ``count_gt``, ``abs_gt``. ``threshold`` is required for the
         ``count_lt``/``count_gt``/``abs_gt`` variants. Use ``over=<last_dimension>``
         (e.g. ``over="screen"``) for cross-screen aggregation.
+
+        ``fill_value`` (if set) replaces NaN with that constant BEFORE reducing —
+        e.g. ``fill_value=0`` averages a gene over ALL screens (a screen that
+        didn't measure it counts as 0) instead of only the screens that did. By
+        default (None) missing cells are ignored.
         """
         spec: dict[str, Any] = {"type": how, "over": over}
         if threshold is not None:
             spec["threshold"] = threshold
+        if fill_value is not None:
+            spec["fill_value"] = fill_value
         return self.query(dataset, datatype, select=select or None, aggregate=spec, raw=raw)
 
     def diagonal(

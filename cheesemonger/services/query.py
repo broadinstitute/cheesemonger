@@ -147,8 +147,15 @@ def _aggregate_array(arr: np.ndarray, axis: int, aggregate: AggregateSpec) -> np
     Shared by within-block reduction (a datatype's own axis) and cross-block
     reduction (the stacked-blocks axis), so both paths behave identically. NaNs
     are ignored by mean/median/min/max/count, and never satisfy the threshold
-    predicates.
+    predicates — UNLESS ``aggregate.fill_value`` is set, in which case NaNs are
+    replaced with it first (so "missing" counts as that value, e.g. 0).
     """
+    # Optional pre-fill: treat missing cells as a constant rather than ignoring
+    # them. Only float arrays carry NaN; int arrays have none, so this is a no-op
+    # for them (np.isnan would also reject an int dtype).
+    if aggregate.fill_value is not None and np.issubdtype(arr.dtype, np.floating):
+        arr = np.where(np.isnan(arr), aggregate.fill_value, arr)
+
     t = aggregate.type
     if t == "mean":
         return np.nanmean(arr, axis=axis)

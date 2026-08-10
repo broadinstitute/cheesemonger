@@ -151,6 +151,40 @@ Across the full dataset (30 blocks × 15 datatypes, though not all datatypes are
 
 `30 blocks × 80 chunks × 8 full-dim datatypes = 19,200 chunks` (plus smaller counts for reduced-dimension datatypes)
 
+### Correlate stores (`*_target_corr`, `*_response_corr`)
+
+The correlate stores have a different shape and are chunked separately from the
+degs hypercube. Their dimensions are `(Rank, Timepoint, <keyed dim>)`, where the
+keyed dim is `Target` (target_corr) or `Response` (response_corr), and `Rank` is
+the top-N leaderboard position (e.g. 100). Datatypes: `Correlation` (float32) plus
+the object-dtype coordinate arrays `CorrelateTarget` / `CorrelateResponse` /
+`CorrelateTimepoint`.
+
+**Chunk shape:** `(Rank=whole, Timepoint=1, <keyed dim>=1024)`.
+
+Two access patterns must both stay fast, which sets the keyed-dim chunk width:
+
+1. **Single-entity lookup** — "read one target's top-N correlates" fixes the keyed
+   dim + Timepoint and reads the whole `Rank` axis. Wants a *small* keyed chunk so
+   the lookup reads ≈ one chunk.
+2. **Full-axis value-filter scan** — `POST /filter` with no keyed selection scans
+   every entity to find passing cells. Wants a *large* keyed chunk so the scan
+   touches few chunks (per-chunk read overhead, not bytes, dominates here — the
+   whole `Correlation` cube is only ~a few MB).
+
+`1024` is the balance point. For a 9,776-target store, `Correlation`
+(`Rank=100 × Timepoint=1 × Target=1024` × 4 B ≈ **410 KB/chunk**) gives:
+
+- **scan:** `⌈9776/1024⌉ × 2 timepoints ≈ 20 chunks` (was **19,552** at the old
+  `keyed=1`, which made value-filter scans take ~a minute);
+- **lookup:** exactly **1 chunk** (~410 KB) per (entity, timepoint).
+
+Set via the loader (`--chunk Target=1024 --chunk Timepoint=1`) — see the
+`TARGET_CHUNK` knob in `docs/bulk_load_cheesemonger_data.sh` (default `1024`).
+Lower it (e.g. 256) to favor point lookups, raise it (e.g. 4096) to favor scans;
+**never use `1`** — one tiny chunk per entity produces tens of thousands of files
+and cripples scans.
+
 ---
 
 ## 4. Benchmark Findings
