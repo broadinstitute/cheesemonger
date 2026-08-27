@@ -125,7 +125,9 @@ class QueryError(Exception):
 def _numpy_to_json(arr: np.ndarray) -> list | float | int | None:
     """Convert a numpy array to JSON-serializable Python types.
 
-    Uses arr.tolist() for fast conversion, then replaces NaN with None.
+    Uses arr.tolist() for fast conversion, then replaces NaN with None. NaN is
+    not valid JSON (FastAPI serializes with allow_nan=False), so every NaN has
+    to be turned into null here or the response fails to render.
     """
     if arr.ndim == 0:
         val = arr.item()
@@ -137,6 +139,17 @@ def _numpy_to_json(arr: np.ndarray) -> list | float | int | None:
         obj_arr = arr.astype(object)
         obj_arr[np.isnan(arr)] = None
         return obj_arr.tolist()
+
+    if arr.dtype == object:
+        # String datatypes (e.g. CorrelateTarget) load as object arrays, and
+        # _align_blocks NaN-fills the labels a block lacks — so an object array
+        # can carry NaN even though it isn't a float array. `x != x` is only
+        # true for NaN, and on object dtype numpy evaluates it element-wise.
+        nan_mask = arr != arr
+        if np.any(nan_mask):
+            obj_arr = arr.copy()
+            obj_arr[nan_mask] = None
+            return obj_arr.tolist()
 
     return arr.tolist()
 
@@ -357,6 +370,13 @@ def _align_blocks(
         if all(block_labels[dim] == union[dim] for dim in dims):
             aligned.append(arr)  # already full — skip the reindex
             continue
+        if arr.dtype.kind in "TSU":
+            # NumPy's fixed- and variable-width string dtypes can't hold the NaN
+            # fill: promoting StringDType against a float raises outright, so a
+            # string datatype (e.g. CorrelateTarget) has to become object dtype
+            # first. Object arrays stack cleanly with unreindexed string ones,
+            # and _numpy_to_json turns the NaN fills into null.
+            arr = arr.astype(object)
         da = xr.DataArray(arr, dims=dims, coords=block_labels)
         da = da.reindex({dim: union[dim] for dim in dims}, fill_value=np.nan)  # type: ignore[arg-type]
         aligned.append(da.values)

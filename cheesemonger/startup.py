@@ -4,6 +4,7 @@ Called once from main.py. Registers all routers, creates DB tables,
 and creates singleton services (stored on app.state).
 """
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib import metadata
@@ -22,6 +23,8 @@ from .services.gene_mappings import GeneMappingService
 from .services.query import QueryService
 
 _PACKAGE_NAME = "cheesemonger"
+
+logger = logging.getLogger(__name__)
 
 try:
     _VERSION = metadata.version(_PACKAGE_NAME)
@@ -55,6 +58,28 @@ def create_app(settings: Settings) -> FastAPI:
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     app.add_exception_handler(InvalidName, _invalid_name_handler)
+
+    def _unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+        """Return the failure's type and message instead of a bare 500 body.
+
+        Without this, FastAPI answers any unexpected exception with the opaque
+        text "Internal Server Error", which tells a client nothing — not even
+        whether the fault is in the request or in the data on disk. This is an
+        internal, authenticated API, so echoing the exception is worth far more
+        than hiding it. The traceback stays server-side (logged with the request
+        path); only the one-line summary goes over the wire.
+        """
+        logger.exception(
+            "Unhandled error handling %s %s", request.method, request.url.path
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Internal error: {type(exc).__name__}: {exc}"},
+        )
+
+    # Starlette sends this response and then re-raises, so uvicorn still logs
+    # the failure as a server error.
+    app.add_exception_handler(Exception, _unhandled_error_handler)
 
     # Create all tables on startup (single source of truth in db.init_db).
     from .db import init_db

@@ -782,3 +782,92 @@ def test_block_key_empty_list_422(client, settings, db):
         "select": [{"dimension": "screen", "value": []}],
     })
     assert r.status_code == 422, r.text
+
+
+# --- String (object-dtype) datatypes across ragged blocks ------------------
+#
+# Correlation-style datasets carry string datatypes ("which gene is the Nth
+# most correlated partner") alongside the float Correlation. Object arrays pick
+# up the same NaN fills as float arrays when blocks disagree on labels, and NaN
+# is not valid JSON — hence these tests.
+
+CORR_SCHEMA = {
+    "name": "corr",
+    "last_dimension": "screen",
+    "dimensions": [
+        {"name": "Rank", "labels": ["1", "2", "3"]},
+        {"name": "Target", "labels": ["103", "226"]},
+    ],
+    "datatypes": [
+        {"name": "Correlation", "dimensions": ["Rank", "Target"]},
+        {"name": "CorrelateTarget", "dimensions": ["Rank", "Target"]},
+    ],
+}
+
+
+def _write_corr_block(settings, db, name: str, ranks: list[str]) -> None:
+    """A block whose Rank axis carries `ranks` (any subset of the dataset's)."""
+    dims = ["Rank", "Target"]
+    coords = {"Rank": ranks, "Target": ["103", "226"]}
+    n = len(ranks) * 2
+    corr = np.arange(n, dtype="float32").reshape(len(ranks), 2)
+    labels = np.array(
+        [f"{name}-{r}-{t}" for r in ranks for t in ("103", "226")], dtype=object
+    ).reshape(len(ranks), 2)
+    blk = xr.Dataset(
+        {
+            "Correlation": xr.DataArray(corr, dims=dims, coords=coords),
+            "CorrelateTarget": xr.DataArray(labels, dims=dims, coords=coords),
+        }
+    )
+    path = Path(settings.data_dir) / "corr" / "blocks" / name
+    path.mkdir(parents=True, exist_ok=True)
+    blk.to_zarr(str(path), mode="w")
+    ds_crud.create_block(db, "corr", name)
+
+
+def test_string_datatype_multiblock_ragged_serializes_nan_as_null(client, settings, db):
+    """A string datatype spanning ragged blocks nulls the labels a block lacks.
+
+    Regression: the NaN fill _align_blocks writes into an object array used to
+    reach json.dumps untouched, which rejects NaN and turned the response into
+    an opaque 500.
+    """
+    ds_crud.create_dataset(db, DatasetIn(**CORR_SCHEMA))
+    _write_corr_block(settings, db, "A", ["1", "2", "3"])
+    _write_corr_block(settings, db, "B", ["1", "2"])  # no rank 3
+    db.commit()
+
+    r = client.post("/datasets/corr/query", json={
+        "datatypes": ["CorrelateTarget", "Correlation"],
+        "select": [{"dimension": "Target", "value": "103"}],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["index"][0]["dimension"] == "screen"
+    assert body["index"][1]["labels"] == ["1", "2", "3"]
+    rows = dict(zip(body["index"][0]["labels"], body["data"]["CorrelateTarget"],
+                    strict=True))
+    assert rows["A"] == ["A-1-103", "A-2-103", "A-3-103"]
+    assert rows["B"] == ["B-1-103", "B-2-103", None]  # missing rank -> null
+    # the float datatype alongside it is nulled the same way
+    corr = dict(zip(body["index"][0]["labels"], body["data"]["Correlation"],
+                    strict=True))
+    assert corr["B"] == [0.0, 2.0, None]
+
+
+def test_string_datatype_single_block_unaffected(client, settings, db):
+    """A single block needs no alignment, so its labels come back verbatim."""
+    ds_crud.create_dataset(db, DatasetIn(**CORR_SCHEMA))
+    _write_corr_block(settings, db, "A", ["1", "2", "3"])
+    db.commit()
+
+    r = client.post("/datasets/corr/query", json={
+        "datatypes": ["CorrelateTarget"],
+        "select": [
+            {"dimension": "screen", "value": "A"},
+            {"dimension": "Target", "value": "226"},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["CorrelateTarget"] == ["A-1-226", "A-2-226", "A-3-226"]
