@@ -364,3 +364,89 @@ def test_list_datasets_returns_dataframe():
     df = cm.list_datasets()
     assert isinstance(df, pd.DataFrame)
     assert df.loc[0, "name"] == "perturb-scuba"
+
+
+# --- which names hold genes ------------------------------------------------
+#
+# Only the dimensions in GENE_DIMENSIONS and the datatypes in GENE_DATATYPES are
+# translated. The bug these pin: entrez 1/2/3 are A1BG/A2M/A2MP1, so a `Rank`
+# axis of 1..99 used to come back as gene symbols.
+
+RANK_MAP = {"1": "A1BG", "2": "A2M", "3": "A2MP1", "7157": "TP53", "4193": "MDM2"}
+
+
+def _gene_map_handler(payload, map_entries=RANK_MAP, captured=None):
+    """A handler serving `payload` for the data call and a gene map for /gene_mappings."""
+    def handler(request):
+        if request.url.path == "/gene_mappings":
+            if captured is not None:
+                captured["fetched_map"] = True
+            return httpx.Response(200, json={"entries": map_entries})
+        if captured is not None:
+            captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json=payload)
+    return handler
+
+
+def _corr_query_payload():
+    """Screen x Rank result: the shape that exposed the bug."""
+    return {
+        "blocks": ["S1"], "aggregation": None, "shape": [1, 3],
+        "index": [
+            {"dimension": "Screen", "labels": ["S1"]},
+            {"dimension": "Rank", "labels": ["1", "2", "3"]},
+        ],
+        "data": {
+            "CorrelateTarget": [["7157", "4193", "1"]],
+            "CorrelateTimepoint": [["D4", "D4", "D4"]],
+            "Correlation": [[0.9, 0.8, 0.7]],
+        },
+    }
+
+
+def test_rank_labels_are_not_translated_to_symbols():
+    cm = make_client(_gene_map_handler(_corr_query_payload()), gene_symbols=True)
+    out = cm.series("corr", ["CorrelateTarget", "Correlation"], Target="TP53")
+    # Rank is not a gene dimension: 1/2/3 stay put instead of becoming A1BG/A2M/A2MP1.
+    assert list(out["CorrelateTarget"].columns) == ["1", "2", "3"]
+    assert out["CorrelateTarget"].columns.name == "Rank"
+
+
+def test_gene_datatype_values_are_translated():
+    """The partner gene lives in the DATA on correlation stores, not on an axis."""
+    cm = make_client(_gene_map_handler(_corr_query_payload()), gene_symbols=True)
+    out = cm.series("corr", ["CorrelateTarget", "Correlation"], Target="TP53")
+    # CorrelateTarget is gene-valued -> symbols; the unmapped-in-this-map id stays.
+    assert out["CorrelateTarget"].loc["S1"].tolist() == ["TP53", "MDM2", "A1BG"]
+    # Correlation is numeric and must never be reinterpreted as ids.
+    assert out["Correlation"].loc["S1"].tolist() == [0.9, 0.8, 0.7]
+
+
+def test_non_gene_string_datatype_values_are_left_alone():
+    payload = _corr_query_payload()
+    payload["data"]["CorrelateTimepoint"] = [["1", "2", "3"]]  # numeric-looking timepoints
+    cm = make_client(_gene_map_handler(payload), gene_symbols=True)
+    out = cm.series("corr", "CorrelateTimepoint", Target="TP53")
+    assert out.loc["S1"].tolist() == ["1", "2", "3"]
+
+
+def test_filter_rank_column_is_not_translated():
+    payload = {
+        "dimensions": ["Rank", "Screen"],
+        "coords": {"Rank": ["1", "2"], "Screen": ["S1", "S1"]},
+        "data": {"Correlation": [0.9, 0.8], "CorrelateTarget": ["7157", "4193"]},
+        "count": 2, "truncated": False,
+    }
+    cm = make_client(_gene_map_handler(payload), gene_symbols=True)
+    out = cm.filter("corr", "Correlation", ">", 0.5, datatypes=["CorrelateTarget"])
+    assert out["Rank"].tolist() == ["1", "2"]              # not A1BG/A2M
+    assert out["CorrelateTarget"].tolist() == ["TP53", "MDM2"]  # still translated
+
+
+def test_unlisted_dimension_is_left_alone():
+    """A dimension in neither list is non-gene by default — the safe answer."""
+    payload = _corr_query_payload()
+    payload["index"][1] = {"dimension": "Partner", "labels": ["1", "2", "3"]}
+    cm = make_client(_gene_map_handler(payload), gene_symbols=True)
+    out = cm.series("corr", "CorrelateTarget", Target="TP53")
+    assert list(out.columns) == ["1", "2", "3"]

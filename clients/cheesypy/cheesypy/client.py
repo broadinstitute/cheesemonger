@@ -16,6 +16,38 @@ _FILTER_OPS = {
     "gt": "gt", "lt": "lt", "eq": "eq", "ge": "ge", "le": "le",
 }
 
+# --- What holds gene ids -----------------------------------------------------
+#
+# Coordinate labels and string data values are entrez ids, and the client
+# translates them to/from HGNC symbols in `gene_symbols=True` mode. Only the
+# names listed here are translated.
+#
+# The lists exist because a bare entrez id is indistinguishable from any other
+# small integer: entrez 1 is A1BG, 2 is A2M, 9 is NAT1. Translating every label
+# therefore rewrote non-gene axes whose labels happen to be small integers — a
+# `Rank` axis of 1..99 came back as "A1BG, A2M, A2MP1, 4, 5, ...". Deciding by
+# NAME rather than by whether a lookup happens to hit is the fix.
+#
+# The server does not (yet) declare which dimensions and datatypes hold genes,
+# so the knowledge lives here. See docs/gene_symbol_relabel_issue.md.
+
+# Dimensions whose coordinate LABELS are entrez ids.
+GENE_DIMENSIONS = frozenset({
+    "Target",                 # perturbed gene (deployed datasets)
+    "Response",               # measured gene (deployed datasets)
+    "testedperturbation",     # PESCA naming (CLAUDE.md, tests)
+    "testedgeneexpression",   # PESCA naming (CLAUDE.md, tests)
+})
+
+# Datatypes whose string VALUES are entrez ids — the correlation stores put the
+# partner gene's identity in the data rather than on an axis (the axis is Rank,
+# a position). CorrelateTimepoint is deliberately absent: its values are
+# timepoints ("D4"), not genes.
+GENE_DATATYPES = frozenset({
+    "CorrelateTarget",
+    "CorrelateResponse",
+})
+
 
 class Cheesemonger:
     """Client for a Cheesemonger server.
@@ -32,8 +64,10 @@ class Cheesemonger:
     ``raw=True`` to get the plain response dict.
 
     With ``gene_symbols=True`` the client fetches the server's entrez<->symbol
-    mapping once, lets you query by gene symbol, and relabels result indexes
-    back to symbols. Labels not in the mapping (e.g. timepoints) pass through.
+    mapping once, lets you query by gene symbol, and translates results back to
+    symbols. Only the dimensions in ``GENE_DIMENSIONS`` and the datatypes in
+    ``GENE_DATATYPES`` are translated; everything else (``Rank``, ``Timepoint``,
+    the block key, any name not listed) is left exactly as the server sent it.
     """
 
     def __init__(
@@ -101,8 +135,9 @@ class Cheesemonger:
     ) -> list:
         """All coordinate labels for one dimension (e.g. every timepoint / target /
         response), not truncated. Pass the block-key name (e.g. ``"screen"``) to
-        list the loaded blocks. With ``gene_symbols=True``, gene labels are
-        translated to symbols; non-gene labels (timepoints, screens) pass through.
+        list the loaded blocks. With ``gene_symbols=True``, a gene dimension's
+        labels are translated to symbols; every other dimension (``Rank``,
+        ``Timepoint``, the block key) is returned as stored.
         """
         params: dict[str, Any] = {"offset": offset}
         if limit is not None:
@@ -110,7 +145,7 @@ class Cheesemonger:
         labels = self._request("GET", f"/datasets/{dataset}/dimensions/{dim}", params=params)[
             "labels"
         ]
-        if self._gene_symbols:
+        if self._is_gene_dimension(dim):
             self._ensure_maps()
             assert self._id2sym is not None
             labels = [self._id2sym.get(str(x), x) for x in labels]
@@ -129,6 +164,18 @@ class Cheesemonger:
         self._id2sym = dict(entries)
         self._sym2id = {sym: gid for gid, sym in entries.items()}
 
+    def _is_gene_dimension(self, dim: str) -> bool:
+        """Whether ``dim``'s labels are entrez ids, and so may be translated.
+
+        An unlisted dimension is treated as non-gene — the safe answer, since an
+        untranslated id is obvious while a rank rewritten as a gene symbol is not.
+        """
+        return self._gene_symbols and dim in GENE_DIMENSIONS
+
+    def _is_gene_datatype(self, datatype: str) -> bool:
+        """Whether ``datatype``'s string values are entrez ids."""
+        return self._gene_symbols and datatype in GENE_DATATYPES
+
     def _to_id(self, value: int | str) -> int | str:
         if not self._gene_symbols:
             return value
@@ -142,31 +189,59 @@ class Cheesemonger:
             return [self._to_id(v) for v in value]
         return self._to_id(value)
 
+    def _to_symbols(self, value: Any) -> Any:
+        """Map entrez ids to symbols through a scalar or nested-list data value.
+
+        Only strings are looked up: the values of a numeric datatype must never
+        be reinterpreted as ids (a Correlation of 1.0 is not A1BG). Query data
+        arrays nest one level per free dimension, hence the recursion.
+        """
+        assert self._id2sym is not None
+        if isinstance(value, list):
+            return [self._to_symbols(v) for v in value]
+        if isinstance(value, str):
+            return self._id2sym.get(value, value)
+        return value
+
     def _relabel_to_symbols(self, resp: dict) -> None:
+        """Translate a /query response in place: index labels and data values.
+
+        Index levels are translated only for gene dimensions, and data values
+        only for gene datatypes — so a `Rank` axis keeps its 1..99 and a
+        `CorrelateTarget` column of partner ids becomes symbols.
+        """
         if not self._gene_symbols:
             return
         self._ensure_maps()
         assert self._id2sym is not None
         for level in resp["index"]:
-            level["labels"] = [self._id2sym.get(str(lbl), lbl) for lbl in level["labels"]]
+            if self._is_gene_dimension(level["dimension"]):
+                level["labels"] = [
+                    self._id2sym.get(str(lbl), lbl) for lbl in level["labels"]
+                ]
+        for dt in resp["data"]:
+            if self._is_gene_datatype(dt):
+                resp["data"][dt] = self._to_symbols(resp["data"][dt])
 
     def _relabel_filter(self, resp: dict) -> None:
-        # Relabel gene ids to symbols in coordinate columns AND string-valued data
-        # columns (e.g. CorrelateResponse), so the flagship `CorrelateResponse in
-        # [symbols]` round-trips symbols in and symbols out. Non-gene labels pass
-        # through unchanged. (Caveat: a numeric non-gene label that collides with
-        # an entrez id — e.g. a small-integer Rank/Timepoint — is relabeled too;
-        # this is the same limitation as query()'s index relabeling.)
+        """Translate a /filter response in place: coord columns and data values.
+
+        Same rule as the query path, applied to the tidy shape — which is what
+        makes the flagship `CorrelateResponse in [symbols]` round-trip symbols
+        in and symbols out, while the `Rank` column stays numeric.
+        """
         if not self._gene_symbols:
             return
         self._ensure_maps()
         assert self._id2sym is not None
         for dim, labels in resp["coords"].items():
-            resp["coords"][dim] = [self._id2sym.get(str(lbl), lbl) for lbl in labels]
+            if self._is_gene_dimension(dim):
+                resp["coords"][dim] = [self._id2sym.get(str(lbl), lbl) for lbl in labels]
         for dt, vals in resp["data"].items():
-            resp["data"][dt] = [
-                self._id2sym.get(v, v) if isinstance(v, str) else v for v in vals
-            ]
+            if self._is_gene_datatype(dt):
+                resp["data"][dt] = [
+                    self._id2sym.get(v, v) if isinstance(v, str) else v for v in vals
+                ]
 
     # --- read ------------------------------------------------------------
 
