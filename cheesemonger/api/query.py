@@ -1,7 +1,3 @@
-# TODO: Validate selection labels against schema coordinates in the router
-# (before calling the engine) to give clean 422s with useful messages,
-# rather than relying on xarray KeyError strings.
-
 from __future__ import annotations
 
 from typing import Annotated

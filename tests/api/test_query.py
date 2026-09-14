@@ -561,6 +561,101 @@ def test_multiblock_ragged_labels_union_nan_aligned(client, settings, db):
     assert rows["B"] == [0.0, 1.0, None, None]
 
 
+def test_scalar_selection_missing_from_one_block_is_nan(client, settings, db):
+    """Fixing a gene that only SOME screens measured returns NaN for the screens
+    that lack it, instead of failing the whole query. Selecting a label is the
+    same question as reading it off the free axis, so it must give the same
+    answer as test_multiblock_ragged_labels_union_nan_aligned does for 672."""
+    ds_crud.create_dataset(db, DatasetIn(**SCHEMA))
+    _write_block(settings, db, "A", ["103", "226", "672", "7157"])  # has 672
+    _write_block(settings, db, "B", ["103", "226"])                 # lacks 672
+    db.commit()
+
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+            {"dimension": "testedgeneexpression", "value": "672"},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Only the screen dim survives: the other three were all fixed.
+    assert [lvl["dimension"] for lvl in body["index"]] == ["screen"]
+    assert body["shape"] == [2]
+    assert dict(zip(body["index"][0]["labels"], body["data"]["ZScore"], strict=True)) == {
+        "A": 2.0,
+        "B": None,
+    }
+
+
+def test_list_selection_partially_missing_from_one_block_is_nan(client, settings, db):
+    """A list selection keeps every requested label in the requested order; the
+    ones a screen lacks are NaN there."""
+    ds_crud.create_dataset(db, DatasetIn(**SCHEMA))
+    _write_block(settings, db, "A", ["103", "226", "672", "7157"])
+    _write_block(settings, db, "B", ["103", "226"])
+    db.commit()
+
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+            {"dimension": "testedgeneexpression", "value": ["7157", "103"]},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["index"][1]["labels"] == ["7157", "103"]  # requested order kept
+    rows = dict(zip(body["index"][0]["labels"], body["data"]["ZScore"], strict=True))
+    assert rows["A"] == [3.0, 0.0]
+    assert rows["B"] == [None, 0.0]  # B has 103 but not 7157
+
+
+def test_aggregate_over_blocks_with_partially_present_selection(client, settings, db):
+    """Cross-screen aggregation with the gene fixed counts only the screens that
+    measured it — the shape of the reported SNHG15/SMG6 bug."""
+    ds_crud.create_dataset(db, DatasetIn(**SCHEMA))
+    _write_block(settings, db, "A", ["103", "226", "672", "7157"])
+    _write_block(settings, db, "B", ["103", "226"])
+    db.commit()
+
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedperturbation", "value": "103"},
+            {"dimension": "testedgeneexpression", "value": "672"},
+        ],
+        "aggregate": {"type": "count_gt", "over": "screen", "threshold": 1},
+    })
+    assert r.status_code == 200, r.text
+    # A has 672 = 2.0 (> 1); B's NaN never satisfies the predicate.
+    assert r.json()["data"]["ZScore"] == 1
+
+
+def test_selection_missing_from_every_block_still_422(client, settings, db):
+    """A label NO screen carries is still a clean error — NaN-filling applies to
+    unmeasured labels, not to typos."""
+    ds_crud.create_dataset(db, DatasetIn(**SCHEMA))
+    _write_block(settings, db, "A", ["103", "226"])
+    _write_block(settings, db, "B", ["103", "226"])
+    db.commit()
+
+    r = _query(client, {
+        "datatypes": ["ZScore"],
+        "select": [
+            {"dimension": "timepoint", "value": 4},
+            {"dimension": "testedgeneexpression", "value": "NOSUCHGENE"},
+        ],
+    })
+    assert r.status_code == 422, r.text
+    detail = r.json()["detail"]
+    assert "testedgeneexpression" in detail and "NOSUCHGENE" in detail
+
+
 def test_multiblock_ragged_aggregation_ignores_nan(client, settings, db):
     """Cross-block mean over ragged screens: a gene present in only one screen
     averages to that screen's value (NaN fills are ignored)."""

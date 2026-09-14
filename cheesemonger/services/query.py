@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 
 from cheesemonger.models.dataset import SchemaDict
@@ -221,29 +222,109 @@ def _free_coords(da: xr.DataArray, exclude: str | None = None) -> list[tuple[str
     return out
 
 
+def _validate_selection_labels(
+    array_selections: dict[str, str | list[str]], schema: SchemaDict
+) -> None:
+    """Reject selection labels that NO block in the dataset carries.
+
+    ``dimensions[*].labels`` is the present union maintained at load, so it is
+    exactly "every label some block has". Checking against it here is the only
+    place a genuinely bad label — a typo, a UniProt accession, a gene the
+    dataset never measured — is caught: the per-block read deliberately
+    tolerates a label the block lacks (see ``_safe_sel``).
+
+    Dimensions absent from the schema aren't label-validated (the router already
+    rejects unknown dimension names, and a reduced-rank datatype may simply not
+    carry the dim). Neither is one with no recorded labels: an empty list means
+    "this schema doesn't say", not "this dimension has nothing", so validating
+    against it would reject every selection on it.
+    """
+    known = {d["name"]: d["labels"] for d in schema["dimensions"]}
+    missing: list[str] = []
+    for dim, val in array_selections.items():
+        if not known.get(dim):
+            continue
+        valid = set(known[dim])
+        for v in val if isinstance(val, list) else [val]:
+            if str(v) not in valid:
+                missing.append(f"{dim}={v!r}")
+    if missing:
+        raise QueryError(
+            f"Selection value(s) not found in dataset: {', '.join(missing)}"
+        )
+
+
+def _labels_present(index: pd.Index, wanted: list[str]) -> np.ndarray:
+    """Mask of which ``wanted`` labels ``index`` carries.
+
+    A one-label request (the common series query) is a single hash lookup. A
+    long list goes through ``get_indexer``, the same vectorized C lookup
+    ``.sel()`` would do, so the check costs no more than the selection it
+    guards. ``get_indexer`` requires a unique index, hence the fallback.
+    """
+    if len(wanted) == 1:
+        return np.array([wanted[0] in index])
+    if index.is_unique:
+        return np.asarray(index.get_indexer(pd.Index(wanted))) >= 0
+    return np.fromiter((v in index for v in wanted), dtype=bool, count=len(wanted))
+
+
 def _safe_sel(
     da: xr.DataArray, applicable: dict[str, str | list[str]]
 ) -> xr.DataArray:
-    """``da.sel(applicable)``, raising a QueryError that names bad labels.
+    """``da.sel(applicable)``, NaN-filling labels THIS block doesn't carry.
 
-    xarray's own KeyError only says "not all values found"; we pinpoint which
-    value(s) aren't valid labels so the error is actionable. A selection value
-    may be a scalar or a list; each element is checked.
+    Screens measure different label sets, so a fixed selection can name a label
+    the dataset has but this block lacks. That is the same "a gene a screen
+    didn't measure reads as NaN" case ``_align_blocks`` handles for free
+    dimensions — but xarray's ``.sel()`` raises KeyError on it, which would fail
+    the whole multi-block query because one screen is missing one gene. So the
+    labels the block has are selected, and the rest are reindexed in as NaN.
+
+    Labels no block carries are rejected up front by
+    ``_validate_selection_labels``, so anything missing here is genuinely
+    unmeasured rather than a typo. Scalar-vs-list semantics are unchanged: a
+    scalar still collapses its dimension, a list still keeps it in the order
+    requested.
     """
-    try:
-        return da.sel(applicable)
-    except KeyError as e:
-        missing = []
-        for dim, val in applicable.items():
-            valid = {str(x) for x in da.coords[dim].values.tolist()}
-            for v in val if isinstance(val, list) else [val]:
-                if str(v) not in valid:
-                    missing.append(f"{dim}={v!r}")
-        if missing:
-            raise QueryError(
-                f"Selection value(s) not found in dataset: {', '.join(missing)}"
-            ) from e
-        raise QueryError(f"Selection error: {e}") from e
+    present: dict[str, str | list[str]] = {}
+    fill: dict[str, list[str]] = {}
+    collapse: list[str] = []
+    # The block's own pandas indexes — membership is the same hash lookup
+    # .sel() would do, so "missing here" is exactly "would have raised
+    # KeyError". The hash table is built once per block and shared by every
+    # datatype read from it.
+    indexes = da.indexes
+    for dim, val in applicable.items():
+        wanted = val if isinstance(val, list) else [val]
+        index = indexes.get(dim)
+        if index is None:
+            present[dim] = val  # no index to check against; let .sel decide
+            continue
+        have = _labels_present(index, wanted)
+        if have.all():
+            present[dim] = val
+            continue
+        # Take what this block has (as a list, which keeps the dim for the
+        # reindex below), then widen back to the full request.
+        present[dim] = [v for v, ok in zip(wanted, have, strict=True) if ok]
+        fill[dim] = wanted
+        if not isinstance(val, list):
+            collapse.append(dim)
+
+    da = da.sel(present)  # every label checked above, so this cannot KeyError
+    if not fill:
+        return da
+    if da.dtype.kind in "TSU":
+        # A string datatype can't hold the NaN fill — same promotion, and same
+        # reason, as _align_blocks.
+        da = da.astype(object)
+    da = da.reindex(fill, fill_value=np.nan)  # type: ignore[arg-type]
+    if collapse:
+        # A scalar selection drops its dimension; the reindex re-added it as a
+        # length-1 axis, so drop it back out.
+        da = da.isel(dict.fromkeys(collapse, 0), drop=True)
+    return da
 
 
 def _read_datatype_from_ds(
@@ -301,10 +382,10 @@ def _read_diagonal(
     dim_a, dim_b = diagonal
 
     # Same reduced-rank tolerance as the main read path: skip selections for
-    # dims this datatype doesn't have.
+    # dims this datatype doesn't have. Same NaN-fill for labels this block lacks.
     applicable = {k: v for k, v in array_selections.items() if k in da.dims}
     if applicable:
-        da = da.sel(applicable)
+        da = _safe_sel(da, applicable)
 
     labels_a = [str(lbl) for lbl in da.coords[dim_a].values]
     labels_b = [str(lbl) for lbl in da.coords[dim_b].values]
@@ -436,9 +517,11 @@ def _filter_one_block(
 ) -> FilterBlockResult:
     """Apply ``filt`` to one opened block and gather the passing cells.
 
-    Fixed ``select`` dims are applied first (scalars collapse, lists subset).
-    The predicate on ``filt.datatype`` yields a mask; every returned datatype is
-    then read out AT the passing cells only. At most ``cap`` cells are kept.
+    Fixed ``select`` dims are applied first (scalars collapse, lists subset); a
+    selected label this block lacks comes back as NaN, which no predicate
+    accepts, so it simply contributes no rows. The predicate on ``filt.datatype``
+    yields a mask; every returned datatype is then read out AT the passing cells
+    only. At most ``cap`` cells are kept.
 
     The filtered datatype is read once (its whole array is needed to evaluate the
     predicate) and reused to gather its passing values. Co-located datatypes are
@@ -567,6 +650,10 @@ class QueryService:
             else:
                 array_selections[sel.dimension] = sel.value
 
+        # Bad labels are caught here, against the dataset-wide union, so the
+        # per-block read is free to treat a label a block lacks as NaN.
+        _validate_selection_labels(array_selections, schema)
+
         if isinstance(block_selection, list):
             target_blocks = block_selection
             keep_block_dim = True
@@ -664,6 +751,8 @@ class QueryService:
                 block_selection = sel.value
             else:
                 array_selections[sel.dimension] = sel.value
+
+        _validate_selection_labels(array_selections, schema)
 
         if isinstance(block_selection, list):
             target_blocks = block_selection

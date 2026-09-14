@@ -176,14 +176,39 @@ Missing values come back as `NaN`.
 ## Gene symbols
 
 The server stores entrez IDs. Enable symbol mode to query by gene symbol and get
-results indexed by symbol; labels not in the mapping (e.g. timepoints) pass
-through unchanged. The mapping is fetched once and cached.
+results indexed by symbol. The mapping is fetched once and cached.
 
 ```python
 cm = Cheesemonger("https://cheesemonger.internal", gene_symbols=True)
 cm.series("perturb-scuba", "ZScore", screen="PS-SC-1", Target="MDM2")  # MDM2 -> 4193
 # -> Series indexed by gene symbol
 ```
+
+### What gets translated
+
+Only the names the client knows to be gene-typed:
+
+| | default |
+| --- | --- |
+| `GENE_DIMENSIONS` — dimensions whose **labels** are entrez IDs | `Target`, `Response`, `testedperturbation`, `testedgeneexpression` |
+| `GENE_DATATYPES` — datatypes whose string **values** are entrez IDs | `CorrelateTarget`, `CorrelateResponse` |
+
+(`CorrelateTimepoint` is deliberately absent — its values are timepoints.)
+
+Everything else is returned exactly as stored. This matters because an entrez ID
+is indistinguishable from any other small integer — entrez `1` is `A1BG`, `2` is
+`A2M`, `9` is `NAT1` — so translating every label turned a `Rank` axis of `1..99`
+into `A1BG, A2M, A2MP1, 4, 5, …`. Deciding by *name* rather than by whether a
+lookup happens to hit is what prevents that.
+
+A name in neither list is left untranslated — the safe answer, since an
+untranslated ID is obvious on sight while a rank rewritten as a gene symbol is
+not. If a dataset's gene dimension is missing from the list you'll see entrez
+IDs where you expected symbols; add the name to `cheesypy.client.GENE_DIMENSIONS`
+(or `GENE_DATATYPES`).
+
+`raw=True` skips translation entirely and hands back the server's response dict,
+which is the quickest way to see the stored labels.
 
 You can also fetch the raw mapping yourself: `cm.gene_mappings()`.
 

@@ -151,6 +151,54 @@ def test_filter_spans_blocks_with_screen_column(client, settings, db):
     assert "screen" in body["dimensions"]
 
 
+def _ragged_block(genes: list[str]) -> xr.Dataset:
+    """A block whose gene axis carries `genes` (any subset of GENE)."""
+    shape = (len(TP), len(PERT), len(genes))
+    n = int(np.prod(shape))
+    coords = {"timepoint": TP, "testedperturbation": PERT, "testedgeneexpression": genes}
+    return xr.Dataset(
+        {
+            "ZScore": xr.DataArray(
+                np.arange(n, dtype="float32").reshape(shape), dims=DIMS, coords=coords
+            ),
+            "CorrelateResponse": xr.DataArray(
+                np.array([str(i) for i in range(n)]).reshape(shape),
+                dims=DIMS, coords=coords,
+            ),
+            "nHits": xr.DataArray(
+                np.arange(n, dtype="int64").reshape(shape), dims=DIMS, coords=coords
+            ),
+            "nCtrlCells": xr.DataArray(
+                np.array([100.0, 200.0], dtype="float32"),
+                dims=["timepoint"], coords={"timepoint": TP},
+            ),
+        }
+    )
+
+
+def test_filter_select_missing_from_one_block_skips_that_block(client, settings, db):
+    """Selecting a gene only one screen measured filters the screen that has it
+    instead of failing the whole request; the screen that lacks it reads as NaN,
+    which no predicate accepts, so it contributes no rows."""
+    _setup(settings, db, {
+        "A": _ragged_block(GENE),            # has 7157
+        "B": _ragged_block(["103", "226"]),  # does not
+    })
+
+    r = _filter(client, {
+        "filter": {"datatype": "ZScore", "op": "gt", "value": -1},
+        "datatypes": ["CorrelateResponse"],
+        "select": [{"dimension": "testedgeneexpression", "value": "7157"}],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # A's 7157 column: flat indices 3, 7, 11, 15, 19, 23. B contributes nothing.
+    assert body["count"] == 6
+    assert set(body["coords"]["screen"]) == {"A"}
+    assert body["data"]["ZScore"] == [3.0, 7.0, 11.0, 15.0, 19.0, 23.0]
+    assert body["data"]["CorrelateResponse"] == ["3", "7", "11", "15", "19", "23"]
+
+
 def test_filter_empty_result_keeps_dimensions(client, settings, db):
     """A predicate nothing passes returns count 0 with the right dimension names."""
     _setup(settings, db, {"SW620": _block(BASE)})
