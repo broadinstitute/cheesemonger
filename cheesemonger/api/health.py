@@ -29,9 +29,16 @@ class HealthOut(BaseModel):
 def health(
     gene_mapping: Annotated[GeneMappingService, Depends(get_gene_mapping_service)],
 ) -> HealthOut:
-    # Liveness is always "ok" if the process can answer. The gene_mapping block
-    # is a readiness signal: it lets you confirm the Taiga mapping actually
-    # loaded at startup (it loads lazily and degrades silently if Taiga fails).
+    """Liveness and readiness check.
+
+    Always returns `status: "ok"` if the process is up. The `gene_mapping` block
+    is a readiness signal confirming whether the Taiga mapping loaded at startup
+    (it loads lazily and degrades silently if Taiga is unavailable):
+
+    - `loaded: false, taiga_id: ""` — no mapping configured.
+    - `loaded: false, taiga_id: "…"` — configured but failed to load (check logs / token).
+    - `loaded: true` — mapping is serving `entries` genes.
+    """
     return HealthOut(
         status="ok",
         gene_mapping=GeneMappingStatus(

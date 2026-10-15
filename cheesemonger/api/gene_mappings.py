@@ -16,6 +16,14 @@ router = APIRouter(tags=["gene_mappings"])
 def get_gene_mappings(
     svc: Annotated[GeneMappingService, Depends(get_gene_mapping_service)],
 ) -> GeneMappingOut:
+    """Retrieve the gene symbol ↔ entrez ID mapping.
+
+    Sourced from Taiga at server startup. The client uses this to translate between
+    entrez IDs (used throughout the query API) and human-readable gene symbols.
+    Fetch once and cache locally; the mapping does not change at runtime.
+
+    Returns `404` if the server is misconfigured or the Taiga ID was not set.
+    """
     if not svc.is_loaded:
         raise HTTPException(
             status_code=404,

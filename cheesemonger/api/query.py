@@ -31,6 +31,45 @@ def query_data(
     qs: Annotated[QueryService, Depends(get_query_service)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> QueryOut:
+    """Query data from a dataset.
+
+    The primary read endpoint. Reads one or more datatypes at the specified
+    coordinates, with optional aggregation or diagonal extraction.
+
+    **`select`** fixes dimensions. The last dimension (e.g. `screen`) is treated
+    like any other: a scalar value queries one block; omitting it queries all
+    loaded blocks. A list value selects a named subset of blocks while keeping
+    the dimension in the result (e.g. `{"dimension": "screen", "value": ["SW620", "HT29"]}`).
+
+    **`datatypes`** must share dimensions; all come back under `data` keyed by
+    name, sharing one `index`.
+
+    **`aggregate`** collapses a dimension after gathering raw values from all
+    relevant blocks. `fill_value` replaces NaN before reducing (default `null`
+    preserves NaN-ignoring behavior). Threshold-based types (`count_lt`,
+    `count_gt`, `abs_gt`) require `threshold`.
+
+    **`diagonal`** extracts values where two dimensions share coordinate labels
+    (e.g. self-targeting: `testedperturbation == testedgeneexpression`). Cannot
+    be combined with `aggregate`.
+
+    All coordinate labels in requests and responses are raw storage labels
+    (entrez IDs). Use `GET /gene_mappings` to translate to gene symbols.
+
+    **Supported patterns:**
+    1. Series — fix all but one dimension → vector
+    2. Aggregation — fix some dimensions, reduce another → lower-rank result
+    3. Diagonal — extract where two dimensions share labels → vector
+    4. Multi-datatype batch — same coordinates, multiple quantities
+    5. Cross-block — omit the last dimension to span all blocks
+
+    **Error responses:**
+    - `400` — unknown datatype or dimension name
+    - `404` — dataset or block not found
+    - `413` — result too large; narrow the query, aggregate, or fix more dimensions
+    - `422` — invalid selections, `count_lt`/`count_gt`/`abs_gt` without `threshold`,
+      aggregating over a fixed dimension, or mismatched datatype dimensions
+    """
     schema = ds_crud.get_schema_dict(db, dataset)
     if schema is None:
         raise HTTPException(status_code=404, detail="Dataset does not exist")
