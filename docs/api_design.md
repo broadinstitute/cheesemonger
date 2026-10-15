@@ -8,13 +8,14 @@
 
 ## API Overview
 
-Five endpoints, all **read-only**. All request and response bodies are JSON.
+Six endpoints, all **read-only**. All request and response bodies are JSON.
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/health` | Service health check |
 | `GET` | `/datasets` | List all datasets |
 | `GET` | `/datasets/{dataset}` | Get dataset metadata |
+| `GET` | `/datasets/{dataset}/dimensions/{dim}` | Full (pageable) label list for one dimension |
 | `GET` | `/gene_mappings` | Get the gene mappings (entrez ↔ symbol) |
 | `POST` | `/datasets/{dataset}/query` | Query data (read; `POST` only to carry a JSON body) |
 
@@ -155,13 +156,16 @@ class ChunkDim(BaseModel):
 ```python
 class Selection(BaseModel):
     dimension: str                         # dimension name, e.g. "screen" or "timepoint"
-    value: int | str                       # coordinate label to fix
+    value: str | list[str]                 # scalar: fix + collapse; list: select subset, keep dim
+    # Integers are accepted on the wire and coerced to str (coordinate labels
+    # are always strings). Lists are only valid for the last dimension (block key).
 
 class AggregateSpec(BaseModel):
     type: Literal["mean", "median", "min", "max",
                   "count", "count_lt", "count_gt", "abs_gt"]
     over: str                              # dimension to aggregate across
     threshold: float | None = None         # required for count_lt/count_gt/abs_gt
+    fill_value: float | None = None        # replace NaN before reducing; None = NaN-ignoring
 ```
 
 Aggregation kinds:
@@ -462,7 +466,7 @@ Patterns 1-5 are single-block queries. Patterns 6-9 are cross-block queries (N b
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `datatypes` | [string] | yes | One or more datatypes to read at the same coordinates (at least one). Multiple datatypes must share dimensions; they come back under `data`, keyed by name, sharing one `index`. |
-| `select` | list[Selection] | yes | Dimensions to fix. Includes the last dimension (e.g. `"screen"`). Omitting a dimension means "all values." |
+| `select` | list[Selection] | yes | Dimensions to fix. Includes the last dimension (e.g. `"screen"`). Omitting a dimension means "all values." A scalar `value` fixes and collapses the dimension; a list `value` selects a named subset while keeping the dimension in the result (list only valid for the last/block dimension). |
 | `aggregate` | AggregateSpec or null | no | Aggregation specification (see below) |
 | `diagonal` | [string, string] or null | no | Two dimension names for diagonal extraction |
 
@@ -484,6 +488,7 @@ Aggregate object (when not null):
 | `type` | string | yes | One of `mean`, `median`, `min`, `max`, `count`, `count_lt`, `count_gt`, `abs_gt` (see the table above). |
 | `over` | string | yes | Dimension to aggregate across. Can be `"screen"` for cross-block aggregation. |
 | `threshold` | number | for `count_lt`/`count_gt`/`abs_gt` | Threshold value for the count. |
+| `fill_value` | number or null | no | If set, NaN cells are replaced with this constant before reducing. Default `null` preserves NaN-ignoring behavior (missing values are excluded). |
 
 ```json
 {
@@ -864,9 +869,10 @@ Estimated latency: **~300 ms** (dominated by the single slowest query, since all
 
 | Status | Condition |
 |--------|-----------|
-| `400 Bad Request` | Unknown datatype, unknown dimension in `select` |
+| `400 Bad Request` | Unknown datatype, unknown dimension in `select` or `aggregate.over` |
 | `404 Not Found` | Dataset or block not found |
-| `422 Unprocessable Entity` | Invalid selection values (e.g., label doesn't exist), `count_lt` without `threshold`, `aggregate.over` references a fully-fixed dimension, malformed request body |
+| `413 Content Too Large` | Estimated result size exceeds server limit; narrow the query, aggregate, or fix more dimensions |
+| `422 Unprocessable Entity` | `count_lt`/`count_gt`/`abs_gt` without `threshold`, `aggregate.over` references a fully-fixed dimension, `diagonal` combined with `aggregate`, mismatched datatype dimensions, malformed request body |
 
 > **Note:** FastAPI/Pydantic return `422 Unprocessable Entity` (not `400`) for request body validation errors (missing required fields, wrong types). This is standard FastAPI behavior.
 
