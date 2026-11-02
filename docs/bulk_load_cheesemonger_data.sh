@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bulk_load.sh — load a whole bucket of per-screen Zarr stores into cheesemonger
+# bulk_load_cheesemonger_data.sh — load a whole bucket of per-screen Zarr stores into cheesemonger
 # as the 5-dataset layout (degs / response_agg / response_corr / target_agg /
 # target_corr), one block per screen. Runs on the deployment HOST, via
 # `docker exec` into the running container (so it uses the container's env,
@@ -16,7 +16,20 @@
 #
 # Usage (on the host):
 #   BUCKET=gs://cds_perturbseq_datasets/ps100_deg_zarrs DATASET_PREFIX=ps100 \
-#       ./bulk_load.sh
+#       ./bulk_load_cheesemonger_data.sh
+#
+# Rerun semantics: by default every load passes --skip-existing, so a block that
+# is already loaded (DB row + store on disk) is left untouched and reported as
+# skipped. That makes the script safe to rerun after an interruption or after new
+# screens land in the bucket: only missing blocks are loaded. (A half-written
+# block from an interrupted load has no DB row; the loader removes it and loads
+# it fresh on the next run.) The CLI has no in-place overwrite — to re-load
+# blocks, use REPLACE=1, which runs `delete-block` and then `load` for each one.
+#
+# Chunking: the --chunk flags below only take effect when a dataset is CREATED
+# (the first block loaded into it). Later blocks reuse the dataset's stored chunk
+# shape and ignore --chunk. To change a dataset's chunking, delete-dataset
+# --force it and reload; REPLACE=1 does not change chunking.
 #
 # Options (env vars):
 #   BUCKET            (required) gs:// prefix holding the *_degs.zarr stores
@@ -40,7 +53,14 @@
 #                     e.g. DEGS_TARGET_CHUNK=100 DEGS_RESPONSE_CHUNK=1000.
 #   LAST_DIMENSION    name of the block key, set when each dataset is created
 #                     (default: Screen)
-#   OVERWRITE=1       replace blocks that already exist (for reruns)
+#   SKIP_EXISTING     1 (default) passes --skip-existing so already-loaded blocks
+#                     are skipped; set SKIP_EXISTING=0 to make an already-loaded
+#                     block an error (counted as a failure) instead
+#   REPLACE=1         re-load blocks that already exist: runs `delete-block` then
+#                     `load` for every (dataset, screen). Destructive — if the
+#                     load then fails, the old block is already gone. A
+#                     "does not exist" from delete-block (new block/dataset) is
+#                     ignored. Overrides SKIP_EXISTING.
 #   SKIP_PREFLIGHT=1  skip the dims/dtypes inspection of the first screen
 #   DRY_RUN=1         print the commands without running them
 #   CHEESE_CONTAINER  docker container name (default: cheesemonger)
@@ -60,13 +80,16 @@ TARGET_CHUNK="${TARGET_CHUNK:-1024}"
 DEGS_TARGET_CHUNK="${DEGS_TARGET_CHUNK:-1000}"
 DEGS_RESPONSE_CHUNK="${DEGS_RESPONSE_CHUNK:-5000}"
 LAST_DIMENSION="${LAST_DIMENSION:-Screen}"
-OVERWRITE="${OVERWRITE:-}"
+SKIP_EXISTING="${SKIP_EXISTING:-1}"
+REPLACE="${REPLACE:-}"
 DRY_RUN="${DRY_RUN:-}"
 
 tty=()
 [ -t 1 ] && tty=(-t)
-ow=()
-[ -n "$OVERWRITE" ] && ow=(--overwrite)
+skip=()
+if [ -z "$REPLACE" ] && [ "$SKIP_EXISTING" = "1" ]; then
+    skip=(--skip-existing)
+fi
 
 # Per-dataset chunk flags. The degs hypercube uses the design-doc 2-D layout
 # (Target × Response bands; see docs/data_storage_design.md). The two correlate
@@ -83,6 +106,10 @@ response_corr_chunks="--chunk Response=${TARGET_CHUNK} --chunk Timepoint=1"
 
 _cli() {  # run a cheesemonger CLI command in the container
     docker exec "${tty[@]}" -e PYTHONUNBUFFERED=1 "$CONTAINER" python -m cheesemonger "$@"
+}
+
+_cli_captured() {  # same, without a TTY so stdout+stderr can be captured
+    docker exec -e PYTHONUNBUFFERED=1 "$CONTAINER" python -m cheesemonger "$@" 2>&1
 }
 
 echo "Discovering screens in $BUCKET ..."
@@ -103,6 +130,13 @@ if [ "${#screens[@]}" -eq 0 ]; then
     exit 1
 fi
 echo "Found ${#screens[@]} screen(s). Datasets: ${PREFIX}_degs, ${PREFIX}_response_agg, ${PREFIX}_response_corr, ${PREFIX}_target_agg, ${PREFIX}_target_corr"
+if [ -n "$REPLACE" ]; then
+    echo "Mode: REPLACE (delete-block, then load, for every block)"
+elif [ "${#skip[@]}" -gt 0 ]; then
+    echo "Mode: skip existing (already-loaded blocks are left untouched)"
+else
+    echo "Mode: strict (an already-loaded block is an error)"
+fi
 echo
 
 # Pre-flight: open the first screen's five stores and print their dims + data
@@ -143,11 +177,30 @@ declare -a failures=()
 
 load_one() {  # dataset  source  "chunk flags"  screen
     local dataset="$1" source="$2" chunks="$3" screen="$4"
+    if [ -n "$REPLACE" ]; then
+        echo "+ delete-block $dataset  block=$screen"
+        if [ -z "$DRY_RUN" ]; then
+            local out
+            if ! out="$(_cli_captured delete-block --dataset "$dataset" --block "$screen")"; then
+                # Nothing to replace yet (new dataset or block) is fine; anything
+                # else is a real failure — don't load over an unknown state.
+                if [[ "$out" == *"does not exist"* ]]; then
+                    echo "  (nothing to delete: $dataset/$screen not loaded yet)"
+                else
+                    printf '%s\n' "$out" >&2
+                    failures+=("$dataset/$screen (delete-block)")
+                    return 0
+                fi
+            else
+                printf '%s\n' "$out"
+            fi
+        fi
+    fi
     echo "+ load $dataset  <-  $(basename "$source")  block=$screen"
     [ -n "$DRY_RUN" ] && return 0
-    # shellcheck disable=SC2086  (chunks must word-split into flags)
+    # shellcheck disable=SC2086 # chunks must word-split into flags
     if ! _cli load --source "$source" --dataset "$dataset" --block "$screen" \
-            --last-dimension "$LAST_DIMENSION" --create-dataset $chunks "${ow[@]}"; then
+            --last-dimension "$LAST_DIMENSION" --create-dataset $chunks "${skip[@]}"; then
         failures+=("$dataset/$screen")
     fi
 }
@@ -169,4 +222,6 @@ if [ "${#failures[@]}" -ne 0 ]; then
 fi
 
 echo "All loads succeeded."
-[ -z "$DRY_RUN" ] && _cli status
+if [ -z "$DRY_RUN" ]; then
+    _cli status
+fi

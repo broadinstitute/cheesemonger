@@ -75,13 +75,18 @@ class Cheesemonger:
         base_url: str,
         *,
         api_key: str | None = None,
+        auth: tuple[str, str] | httpx.Auth | None = None,
         timeout: float = 300.0,
         gene_symbols: bool = False,
         _client: httpx.Client | None = None,
     ):
+        # api_key -> "Authorization: Bearer ..."; auth=(user, password) -> HTTP
+        # Basic (what an htpasswd-backed proxy expects). Any httpx.Auth also works.
+        if api_key and auth is not None:
+            raise ValueError("Pass either api_key= or auth=, not both")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self._http = _client or httpx.Client(
-            base_url=base_url.rstrip("/"), headers=headers, timeout=timeout
+            base_url=base_url.rstrip("/"), headers=headers, auth=auth, timeout=timeout
         )
         self._gene_symbols = gene_symbols
         self._sym2id: dict[str, str] | None = None

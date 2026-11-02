@@ -6,6 +6,7 @@ Usage:
     python -m cheesemonger delete-block --dataset perturb-scuba --block PS-SC-1
     python -m cheesemonger delete-dataset --dataset perturb-scuba --force
     python -m cheesemonger status
+    python -m cheesemonger reconcile --dataset perturb-scuba
 
 All data mutations (create/load/delete of datasets and blocks) happen here, not
 over HTTP, the REST API is read-only. Source data is written by

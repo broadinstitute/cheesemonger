@@ -67,10 +67,17 @@ class Dimension(BaseModel):
 
 class DatatypeSpec(BaseModel):
     name: SafeName
-    dimensions: list[str]
-    dtype: str = "float32"
+    dimensions: list[str] = Field(
+        description=(
+            "Dimensions this datatype spans. A `select` on a dimension it lacks is "
+            "ignored for this datatype."
+        )
+    )
+    dtype: str = Field(
+        default="float32", description="NumPy dtype (e.g. `float32`; `object` for strings)."
+    )
 
 
 class ChunkDim(BaseModel):
     name: SafeName
-    size: int = Field(gt=0)
+    size: int = Field(gt=0, description="Chunk length along this dimension.")

@@ -6,38 +6,40 @@
 
 A dimension is a named axis of a multi-dimensional array.
 
-Cheesemonger's data has **3 array dimensions**: `timepoint`, `testedperturbation`, and `testedgeneexpression`. To locate a single measurement within a block, you must specify a value along every dimension. The `testedperturbation` dimension has cardinality 10,000 by default (there are 10,000 genes that can be knocked out).
+The deployed perturb-seq data (the `*_degs` hypercube) has **3 array dimensions**: `Timepoint`, `Target` (the gene that was knocked out), and `Response` (the gene whose expression was measured). To locate a single measurement within a block, you must specify a value along every dimension. In the design-era sizing used throughout this doc, `Target` has cardinality ~10,000 and `Response` ~18,000; real screens vary.
 
-There is also a **last dimension** (e.g. `screen`) which is not an array axis — it is an organizational key that determines which block to read from. See [Last dimension](#last-dimension) below.
+> Dimension names are not hard-coded — they are inferred from the source store when a dataset is created. Older design docs and the test fixtures use the PESCA-era names `timepoint` / `testedperturbation` / `testedgeneexpression`; they map onto `Timepoint` / `Target` / `Response`.
+
+There is also a **last dimension** (default `Screen`, set per dataset with `load --last-dimension`; case-sensitive) which is not an array axis — it is an organizational key that determines which block to read from. See [Last dimension](#last-dimension) below.
 
 ### Coordinate
 
 A coordinate is a set of labels attached to a dimension. Coordinates map human-readable names (or stable identifiers) to integer indices.
 
-Without coordinates, `data[0, 4327, 0]` is hard to understand. With coordinates, we know that position 0 along `timepoint` is day 4, position 4327 along `testedperturbation` is entrez ID `"4609"` (MYC), and position 0 along `testedgeneexpression` is entrez ID `"29974"` (A1CF).
+Without coordinates, `data[0, 4327, 0]` is hard to understand. With coordinates, we know that position 0 along `Timepoint` is day 4 (label `"D4"`), position 4327 along `Target` is entrez ID `"4609"` (MYC), and position 0 along `Response` is entrez ID `"29974"` (A1CF).
 
-Coordinate labels for gene dimensions are stored as **entrez IDs** (string integers). A separate gene mapping (entrez ↔ gene symbol) is available via the API for client-side translation.
+Coordinate labels are stored as **strings** for every dimension (the loader stringifies them on write, so a numeric label such as a rank `0` is stored and queried as `"0"`). Gene dimensions use **entrez IDs**. A separate gene mapping (entrez ↔ gene symbol) is available via `GET /gene_mappings` for client-side translation.
 
 ### Datatype (shard)
 
 A datatype is one of the measured quantities stored for each combination of dimensions. Examples: `ZScore`, `L2FC`, `FDR`, `nTestCells`.
 
-Queries specify one or more datatypes, and the system reads only those shards. Each shard has its own dimensions, shape, chunk layout, and files on disk. Datatype is deliberately not a dimension — not all datatypes span the same dimensions (e.g. `nCtrlCells` only has a `timepoint` axis).
+Queries specify one or more datatypes, and the system reads only those shards. Each shard has its own dimensions, shape, chunk layout, and files on disk. Datatype is deliberately not a dimension — not all datatypes span the same dimensions (e.g. `nCtrlCells` only has a `Timepoint` axis).
 
 ### Chunk
 
-A chunk is a fixed-size rectangular sub-block of a shard. Chunk shape is chosen to match query access patterns. For cheesemonger, chunks are shaped `(1, 1000, 5000)`, meaning one chunk covers 1 timepoint, 1,000 tested perturbations, and 5,000 tested gene expressions.
+A chunk is a fixed-size rectangular sub-block of a shard. Chunk shape is chosen to match query access patterns. Chunking is set **per dataset** when the dataset is created (see [§3](#3-chunking-strategy)). The recommended layout for the degs hypercube is `(Timepoint=1, Target=1000, Response=5000)`: one chunk covers 1 timepoint, 1,000 targets, and 5,000 responses.
 
-One chunk contains `1 × 1,000 × 5,000 = 5,000,000` float32 values = **20 MB**.
+One such chunk contains `1 × 1,000 × 5,000 = 5,000,000` float32 values = **20 MB**.
 
 ### Last dimension
 
-The last dimension is the organizational key along which new data arrives incrementally. In cheesemonger, this is `screen` — each new biological experiment is loaded as a new **block** (an independent Zarr store in its own folder).
+The last dimension is the organizational key along which new data arrives incrementally. In cheesemonger, this is `Screen` by default — each new biological experiment is loaded as a new **block** (an independent Zarr store in its own folder).
 
 The last dimension is **not** an axis inside the arrays. It is a folder name on disk. This means:
 
-- **Adding a block** = create a new directory, write chunk files. No existing data is touched.
-- **Deleting a block** = `rm -rf {block}/`. O(1), no rewriting.
+- **Adding a block** = create a new directory, write chunk files, insert a block row in SQLite. No existing data is touched.
+- **Deleting a block** = delete its SQLite row and `rm -rf {block}/`. No data rewriting (only the dataset's present-union labels are recomputed; see below).
 - **Querying one block** = open that block's Zarr store. Other blocks are never accessed.
 - **Querying across blocks** = open N stores in parallel, combine results in memory.
 
@@ -45,15 +47,21 @@ In queries, the last dimension behaves like any other dimension from the client'
 
 ### Dataset
 
-A dataset is a collection of blocks that share the same schema (dimensions, coordinates, datatypes, chunk shape). It is the top-level unit of organization in cheesemonger. A dataset has:
+A dataset is a collection of blocks that share the same schema (dimension names, datatypes, chunk shape). It is the top-level unit of organization in cheesemonger. Its metadata lives in the SQLite database (see [On-disk layout](#on-disk-layout-separate-block-model)). A dataset has:
 
-- A **name** (e.g. `pesca`)
-- A **last dimension** name (e.g. `screen`)
+- A **name** (e.g. `ps100_degs`)
+- A **last dimension** name (default `Screen`)
 - A set of **dimensions** with their coordinate labels
 - A list of **datatype shards** (each with its own subset of dimensions)
-- A **chunk shape**
+- A **chunk shape** (possibly empty, meaning the loader's default chunking)
+- An optional **gene universe** — the allowed label superset for gene dimensions
 
-The schema is immutable after creation. Blocks are added incrementally via CLI. All blocks in a dataset must conform to the same schema.
+The dataset is created by the first `load --create-dataset`, which infers it from that block's source store. After that:
+
+- **Fixed at creation:** the last dimension, the dimension *names*, the datatypes, and the chunk shape. Every later block must use only dimensions and datatypes the dataset declares, and is written with the stored chunk shape (any `--chunk` flags on later loads are ignored).
+- **Not fixed:** the dimension *labels*. A dataset's `dimensions[*].labels` is the **present union** — the labels actually present across its loaded blocks. Blocks may carry different label sets (screens legitimately measure different genes); each block's labels must only be a subset of the gene universe, if one is declared. The union grows when a block is loaded, is recomputed from the remaining blocks on `delete-block` (it can shrink), and can be rebuilt from disk at any time with `python -m cheesemonger reconcile --dataset NAME`.
+
+Blocks are added and removed via the CLI only; the REST API is read-only.
 
 ---
 
@@ -61,91 +69,111 @@ The schema is immutable after creation. Blocks are added incrementally via CLI. 
 
 ### Source data
 
-The raw data arrives as **xarray-exported Zarr stores** (one per screen), written via `xarray.Dataset.to_zarr()`. Each store contains 15 datatype arrays as data variables, plus coordinate arrays that encode dimension labels within the Zarr store itself. This is important because raw Zarr has no concept of named coordinates — xarray embeds them using its own conventions (stored in `.zattrs` metadata files).
+The raw data arrives as **xarray-exported Zarr stores** (one per screen), written via `xarray.Dataset.to_zarr()` with zarr-python 3.1.1, i.e. **Zarr format v3**. Each store contains the datatype arrays as data variables (~15 in the design-era sizing), plus coordinate arrays that encode dimension labels within the Zarr store itself. In Zarr v3, each array's `zarr.json` records its `dimension_names` natively, and xarray writes each coordinate as its own 1-D array.
 
-Each store has the following index structure:
+Each degs store has the following index structure:
 
 | Index Column | Dimension | Cardinality | Description |
 |-------------|-----------|-------------|-------------|
-| Screen | `screen` (last dimension) | 30+ | Cell line / experiment identifier |
-| Timepoint | `timepoint` | 2 | Day of measurement after knockout (4, 7) |
-| TestedPerturbation | `testedperturbation` | 10,000 | Gene that was knocked out (entrez ID) |
-| TestedGeneExpression | `testedgeneexpression` | 18,000 | Gene whose expression was measured (entrez ID) |
+| Screen | `Screen` (last dimension) | 30+ | Cell line / experiment identifier |
+| Timepoint | `Timepoint` | 2 | Day of measurement after knockout (`D4`, `D7`) |
+| Target | `Target` | ~10,000 | Gene that was knocked out (entrez ID) |
+| Response | `Response` | ~18,000 | Gene whose expression was measured (entrez ID) |
 
-Each coordinate tuple `(screen, timepoint, testedperturbation, testedgeneexpression)` has values for all 15 datatypes. The full dataset has `30 × 2 × 10,000 × 18,000 = 10.8 billion` measurements per datatype.
+Each coordinate tuple `(Screen, Timepoint, Target, Response)` has values for the full-dimensional datatypes. At design-era sizing the full dataset has `30 × 2 × 10,000 × 18,000 = 10.8 billion` measurements per datatype.
 
-Each dimension has a 1-D coordinate array stored alongside the data. Because the stores are xarray-exported, coordinates are embedded in the Zarr store itself (as separate Zarr arrays with xarray metadata in `.zattrs`). The server reads them via `xarray.open_zarr()`, which reconstructs the full labeled Dataset with named dimensions and coordinates automatically.
+Besides the degs hypercube, each screen also ships aggregate stores (`*_response_agg`, `*_target_agg`) and correlate stores (`*_response_corr`, `*_target_corr`). Each kind is loaded as its own dataset (see `docs/bulk_load_cheesemonger_data.sh`), and each has its own dimensions and chunking.
+
+Each dimension has a 1-D coordinate array stored alongside the data. Because the stores are xarray-exported, coordinates are embedded in the Zarr store itself (as separate Zarr arrays). The server reads them via `xarray.open_zarr()`, which reconstructs the full labeled Dataset with named dimensions and coordinates automatically.
 
 ### On-disk layout (separate-block model)
 
-Dataset metadata (schema, dimensions, datatypes, block registry) is stored in a **SQLite database** (`cheesemonger.db`), not on disk alongside the blocks. See the [API design doc](api_design.md#metadata-storage) for the ERD and details.
+Dataset metadata (last dimension, dimensions and their present-union labels, datatypes, chunk shape, gene universe, block registry) is stored in a **SQLite database** via SQLAlchemy, not on disk alongside the blocks. The location comes from `SQLALCHEMY_DATABASE_URL` (default `sqlite:///./cheesemonger.db`). See the [data model guide](data_model.md) and the [API design doc](api_design.md#metadata-storage) for the ERD and details.
 
-Each block's **data** is an xarray Dataset exported as Zarr. The coordinate arrays (`timepoint/`, `testedperturbation/`, etc.) are written by xarray alongside the data variables.
+Each block's **data** is an xarray Dataset that the CLI loader rewrites as a Zarr v3 store under `DATA_DIR/{dataset}/blocks/{block}/` (`DATA_DIR` defaults to `/mnt/data`). The loader stringifies the coordinates and rechunks to the dataset's chunk shape. The coordinate arrays (`Timepoint/`, `Target/`, `Response/`) are written by xarray alongside the data variables.
 
 ```
-/mnt/data/pesca/
+/mnt/data/ps100_degs/
   blocks/
-    SW620/                       ← one block = one xarray Dataset as Zarr
-      .zattrs                    ← xarray metadata (dimension names, conventions)
-      .zgroup                    ← Zarr group marker
-      .zmetadata                 ← consolidated metadata (optional, for faster open)
+    SW620/                       ← one block = one xarray Dataset as Zarr v3
+      zarr.json                  ← group metadata (node_type "group", zarr_format 3)
+                                   plus inline consolidated metadata for every array
       ZScore/                    ← data variable — 3-D Zarr array
-        .zarray                  ← Zarr array metadata (shape, chunks, dtype)
-        .zattrs                  ← xarray attrs (dimension names: [timepoint, ...])
-        0.0.0                    ← chunk files
-        0.0.1
-        ...
+        zarr.json                ← array metadata: shape, data_type, chunk_grid,
+                                   codecs (e.g. bytes + zstd), fill_value,
+                                   dimension_names ["Timepoint", "Target", "Response"]
+        c/                       ← chunk files, one path segment per dimension
+          0/0/0
+          0/0/1
+          ...
       L2FC/                      ← data variable
         ...
       FDR/
       ...
-      timepoint/                 ← coordinate array written by xarray
-        .zarray
-        .zattrs
-        0
-      testedperturbation/        ← coordinate array (10,000 entrez IDs)
-        .zarray
-        .zattrs
-        0
-      testedgeneexpression/      ← coordinate array (18,000 entrez IDs)
-        .zarray
-        .zattrs
-        0
+      Timepoint/                 ← coordinate array written by xarray
+        zarr.json
+        c/0
+      Target/                    ← coordinate array (entrez IDs, as strings)
+        zarr.json
+        c/0
+      Response/                  ← coordinate array (entrez IDs, as strings)
+        zarr.json
+        c/0
     HT29/
       ...
     A549/
       ...
 ```
 
-The `blocks/` subdirectory mirrors the dataset/block naming: the CLI
-`delete-block --dataset pesca --block SW620` maps directly to
-`rm -rf /mnt/data/pesca/blocks/SW620/`.
+(This layout matches a store written locally by the loader, e.g. `data/perturb-scuba/blocks/PS-SC-1/`.)
 
-**Why xarray-exported Zarr?** Raw Zarr has no concept of named coordinates. When Bella writes `ds.to_zarr(...)`, xarray embeds coordinate labels as separate Zarr arrays and records dimension names in `.zattrs`. When the server reads with `xr.open_zarr(...)`, it reconstructs the full labeled Dataset. This enables `.sel(timepoint=4, testedperturbation="4193")` for label-based indexing instead of manual integer-index lookups.
+The `blocks/` subdirectory mirrors the dataset/block naming: the CLI
+`delete-block --dataset ps100_degs --block SW620` deletes the block's SQLite row,
+removes `/mnt/data/ps100_degs/blocks/SW620/`, and recomputes the dataset's
+present-union labels from the remaining blocks.
+
+**Why xarray-exported Zarr?** Raw Zarr arrays carry dimension names (in v3) but no coordinate labels. When the pipeline writes `ds.to_zarr(...)`, xarray stores each coordinate's labels as a separate Zarr array and links it to the data variables through their `dimension_names`. When the server reads with `xr.open_zarr(...)`, it reconstructs the full labeled Dataset. This enables `.sel(Timepoint="D4", Target="4193")` for label-based indexing instead of manual integer-index lookups.
 
 ---
 
 ## 3. Chunking Strategy
 
-### Current chunk shape
+### How chunking is configured
 
-`(timepoint=1, testedperturbation=1000, testedgeneexpression=5000)`
+Chunking is **per dataset**, chosen when the dataset is created:
 
-One chunk contains `1 × 1,000 × 5,000 = 5,000,000` float32 values = **20 MB**.
+```bash
+python -m cheesemonger load --create-dataset \
+    --source gs://.../SW620_degs.zarr --dataset ps100_degs --block SW620 \
+    --chunk Timepoint=1 --chunk Target=1000 --chunk Response=5000
+```
 
-### Why this shape
+- `--chunk DIM=SIZE` is repeatable. Each listed dimension is chunked to `SIZE`; **every unlisted dimension is kept whole** (one chunk along that axis). Entries naming a dimension the source doesn't have are dropped.
+- The resulting chunk shape is stored on the dataset in SQLite (`chunk_shape`) and **reused for every later block**, so all blocks of a dataset are chunked identically. `--chunk` on a load into an existing dataset is ignored. To change a dataset's chunking, delete the dataset and reload it.
+- With **no** `--chunk` flags, the dataset's chunk shape is empty and the loader falls back to dask `"auto"` chunking with an **~8 MiB per-chunk target** (`_DEFAULT_CHUNK_TARGET` in `cheesemonger/services/loader.py`). That is far below dask's ~128 MiB default, so a point query doesn't pull a huge band. Object-dtype (string) data variables are written as a single chunk, because dask can't size them automatically.
+- Chunk shape is reported by `GET /datasets/{dataset}` (`chunk_shape`).
+
+The bulk loader (`docs/bulk_load_cheesemonger_data.sh`) uses `Timepoint=1, Target=1000, Response=5000` for the degs hypercube. It uses the correlate settings [below](#correlate-stores-_target_corr-_response_corr) for the correlate stores, and the 8 MiB default for the small aggregate stores.
+
+### Recommended degs layout and its rationale
+
+`(Timepoint=1, Target=1000, Response=5000)`
+
+One chunk contains `1 × 1,000 × 5,000 = 5,000,000` float32 values = **20 MB**. This is the "big chunks" layout that won the benchmarks in [§4](#4-benchmark-findings). Those benchmarks used the earlier PESCA naming and are the rationale for these defaults.
 
 1. **Timepoint = 1**: The query fixes one timepoint. Chunk size 1 means no other timepoint's data is loaded.
-2. **TestedPerturbation = 1000**: With 10,000 perturbations and chunk size 1,000, there are 10 perturbation chunks. The query fixes one perturbation, which falls in exactly 1 of the 10 chunks.
-3. **TestedGeneExpression = 5000**: With 18,000 gene expressions and chunk size 5,000, there are 4 expression chunks (5000 + 5000 + 5000 + 3000). The query reads all gene expressions, so it reads all 4 chunks.
+2. **Target = 1000**: With 10,000 targets and chunk size 1,000, there are 10 target chunks. The query fixes one target, which falls in exactly 1 of the 10 chunks.
+3. **Response = 5000**: With 18,000 responses and chunk size 5,000, there are 4 response chunks (5000 + 5000 + 5000 + 3000). The query reads all responses, so it reads all 4 chunks.
 
-A typical series query (fix one timepoint + one perturbation, return all gene expressions) reads **4 chunks = ~80 MB**.
+A typical series query (fix one timepoint + one target, return all responses) reads **4 chunks = ~80 MB**.
+
+The layout is a 2-D balance: "fix Target, sweep Response" and "fix Response, sweep Target" both stay acceptable. Workloads dominated by one series direction can chunk more aggressively, e.g. `--chunk Target=1 --chunk Timepoint=1` (Response whole) makes each `(Timepoint, Target)` series exactly one chunk.
 
 ### Chunk count
 
-Per block, per full-dimensional datatype (e.g. ZScore):
+Per block, per full-dimensional datatype (e.g. ZScore), with the recommended layout:
 
-`2 timepoints × 10 perturbation bands × 4 expression bands = 80 chunks`
+`2 timepoints × 10 target bands × 4 response bands = 80 chunks`
 
 Across the full dataset (30 blocks × 15 datatypes, though not all datatypes are full-dimensional):
 
@@ -188,6 +216,8 @@ and cripples scans.
 ---
 
 ## 4. Benchmark Findings
+
+> These benchmarks were run before chunking became configurable per dataset. They are kept as the **rationale for the recommended defaults** in [§3](#3-chunking-strategy): Zarr on Hyperdisk, with the "big" `(1, 1000, 5000)` degs layout. The 4-tuple chunk shapes below include a leading screen axis of size 1 from the benchmark harness. They used the PESCA-era names (perturbation = `Target`, gene expression = `Response`). The results are still valid for those layouts.
 
 **Date:** 2026-05-27
 **Machine:** c3-standard-4 (4 vCPU, 16 GB RAM)

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi.openapi.models import Example
 from sqlalchemy.orm import Session
 
 from cheesemonger.config import Settings, get_settings
@@ -22,53 +23,132 @@ from .deps import get_query_service
 
 router = APIRouter(prefix="/datasets/{dataset}", tags=["query"])
 
+# Named request bodies shown in the Swagger UI "Try it out" dropdown. Labels are
+# illustrative; real ones come from GET /datasets/{dataset}.
+_QUERY_EXAMPLES: dict[str, Example] = {
+    "series": {
+        "summary": "Series: one target, every response gene",
+        "value": {
+            "datatypes": ["ZScore"],
+            "select": [
+                {"dimension": "Screen", "value": "PS-SC-1"},
+                {"dimension": "Timepoint", "value": "D4"},
+                {"dimension": "Target", "value": "23293"},
+            ],
+        },
+    },
+    "volcano": {
+        "summary": "Several datatypes at the same coordinates",
+        "value": {
+            "datatypes": ["L2FC", "FDR"],
+            "select": [
+                {"dimension": "Screen", "value": "PS-SC-1"},
+                {"dimension": "Timepoint", "value": "D4"},
+                {"dimension": "Target", "value": "23293"},
+            ],
+        },
+    },
+    "subset": {
+        "summary": "Lists keep a dimension: two screens, two targets",
+        "value": {
+            "datatypes": ["ZScore"],
+            "select": [
+                {"dimension": "Screen", "value": ["PS-SC-1", "PS-SC-2"]},
+                {"dimension": "Timepoint", "value": "D4"},
+                {"dimension": "Target", "value": ["23293", "4193"]},
+                {"dimension": "Response", "value": "7157"},
+            ],
+        },
+    },
+    "aggregate": {
+        "summary": "Aggregate: mean across screens",
+        "value": {
+            "datatypes": ["ZScore"],
+            "select": [
+                {"dimension": "Timepoint", "value": "D4"},
+                {"dimension": "Target", "value": "23293"},
+            ],
+            "aggregate": {"type": "mean", "over": "Screen"},
+        },
+    },
+    "count": {
+        "summary": "Count significant hits per target (FDR < 0.1)",
+        "value": {
+            "datatypes": ["FDR"],
+            "select": [
+                {"dimension": "Screen", "value": "PS-SC-1"},
+                {"dimension": "Timepoint", "value": "D4"},
+            ],
+            "aggregate": {"type": "count_lt", "over": "Response", "threshold": 0.1},
+        },
+    },
+    "diagonal": {
+        "summary": "Diagonal: each gene's response to its own knockout",
+        "value": {
+            "datatypes": ["L2FC"],
+            "select": [
+                {"dimension": "Screen", "value": "PS-SC-1"},
+                {"dimension": "Timepoint", "value": "D4"},
+            ],
+            "diagonal": ["Target", "Response"],
+        },
+    },
+}
 
-@router.post("/query", response_model=QueryOut)
+_QUERY_ERRORS: dict[int | str, dict] = {
+    400: {"description": "Unknown datatype, or unknown dimension in `select`/`aggregate.over`"},
+    404: {"description": "Dataset or block not found"},
+    413: {"description": "Estimated result exceeds the server's size limit"},
+    422: {
+        "description": (
+            "Invalid request: label not found, missing `threshold`, aggregating over a "
+            "fixed dimension, `diagonal` with `aggregate`, datatypes with different "
+            "dimensions, empty block-key list, or a malformed body"
+        )
+    },
+}
+
+
+@router.post(
+    "/query", response_model=QueryOut, summary="Query data", responses=_QUERY_ERRORS
+)
 def query_data(
     dataset: str,
-    query: QueryIn,
+    query: Annotated[QueryIn, Body(openapi_examples=_QUERY_EXAMPLES)],
     db: Annotated[Session, Depends(get_db)],
     qs: Annotated[QueryService, Depends(get_query_service)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> QueryOut:
-    """Query data from a dataset.
+    """Read one or more datatypes at chosen coordinates, optionally aggregated
+    or along a diagonal. `POST` only because the request has a JSON body; it
+    never modifies data.
 
-    The primary read endpoint. Reads one or more datatypes at the specified
-    coordinates, with optional aggregation or diagonal extraction.
+    **`select`** fixes dimensions. A single label fixes a dimension and drops it
+    from the result. A list keeps the dimension, restricted to those labels in
+    that order. An omitted dimension is returned in full. The block key (the
+    dataset's `last_dimension`, e.g. `Screen`) follows the same rules: one
+    label reads one block, a list reads that subset, and omitting it reads every
+    block. Results that span blocks are aligned on the union of their labels,
+    with `null` where a block lacks a label.
 
-    **`select`** fixes dimensions. The last dimension (e.g. `screen`) is treated
-    like any other: a scalar value queries one block; omitting it queries all
-    loaded blocks. A list value selects a named subset of blocks while keeping
-    the dimension in the result (e.g. `{"dimension": "screen", "value": ["SW620", "HT29"]}`).
+    **`datatypes`** must have the same dimensions. Each comes back under `data`,
+    sharing one `index`.
 
-    **`datatypes`** must share dimensions; all come back under `data` keyed by
-    name, sharing one `index`.
+    **`aggregate`** reduces one dimension (`over`), including the block key for
+    cross-screen statistics. `count_lt`, `count_gt` and `abs_gt` need a
+    `threshold`. `fill_value` counts missing cells as that value instead of
+    ignoring them.
 
-    **`aggregate`** collapses a dimension after gathering raw values from all
-    relevant blocks. `fill_value` replaces NaN before reducing (default `null`
-    preserves NaN-ignoring behavior). Threshold-based types (`count_lt`,
-    `count_gt`, `abs_gt`) require `threshold`.
+    **`diagonal`** returns the cells where two dimensions have the same label,
+    e.g. `["Target", "Response"]` for each gene's response to its own knockout.
+    It cannot be combined with `aggregate`.
 
-    **`diagonal`** extracts values where two dimensions share coordinate labels
-    (e.g. self-targeting: `testedperturbation == testedgeneexpression`). Cannot
-    be combined with `aggregate`.
+    The result has one `index` entry per free dimension: 0 gives a scalar, 1 a
+    vector, 2 a matrix. Results estimated above the server's size limit are
+    rejected with `413` before any data is read.
 
-    All coordinate labels in requests and responses are raw storage labels
-    (entrez IDs). Use `GET /gene_mappings` to translate to gene symbols.
-
-    **Supported patterns:**
-    1. Series — fix all but one dimension → vector
-    2. Aggregation — fix some dimensions, reduce another → lower-rank result
-    3. Diagonal — extract where two dimensions share labels → vector
-    4. Multi-datatype batch — same coordinates, multiple quantities
-    5. Cross-block — omit the last dimension to span all blocks
-
-    **Error responses:**
-    - `400` — unknown datatype or dimension name
-    - `404` — dataset or block not found
-    - `413` — result too large; narrow the query, aggregate, or fix more dimensions
-    - `422` — invalid selections, `count_lt`/`count_gt`/`abs_gt` without `threshold`,
-      aggregating over a fixed dimension, or mismatched datatype dimensions
+    Labels are stored labels (entrez IDs for genes); translate with
+    `GET /gene_mappings`.
     """
     schema = ds_crud.get_schema_dict(db, dataset)
     if schema is None:

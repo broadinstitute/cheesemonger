@@ -450,3 +450,24 @@ def test_unlisted_dimension_is_left_alone():
     cm = make_client(_gene_map_handler(payload), gene_symbols=True)
     out = cm.series("corr", "CorrelateTarget", Target="TP53")
     assert list(out.columns) == ["1", "2", "3"]
+
+
+def test_auth_tuple_sends_basic_and_keeps_path_prefix():
+    """auth=(user, pw) is HTTP Basic, and a base URL with a path prefix is kept."""
+    captured = {}
+
+    def handler(request):
+        captured["auth"] = request.headers.get("authorization")
+        captured["path"] = request.url.path
+        return httpx.Response(200, json={"datasets": []})
+
+    cm = Cheesemonger("https://proxy.test/cheesemonger", auth=("pfizer", "s3cret"))
+    cm._http._transport = httpx.MockTransport(handler)
+    cm.list_datasets()
+    assert captured["auth"] == httpx.BasicAuth("pfizer", "s3cret")._auth_header
+    assert captured["path"] == "/cheesemonger/datasets"
+
+
+def test_api_key_and_auth_are_mutually_exclusive():
+    with pytest.raises(ValueError):
+        Cheesemonger("http://test", api_key="k", auth=("u", "p"))

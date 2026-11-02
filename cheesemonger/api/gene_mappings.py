@@ -12,17 +12,22 @@ from .deps import get_gene_mapping_service
 router = APIRouter(tags=["gene_mappings"])
 
 
-@router.get("/gene_mappings", response_model=GeneMappingOut)
+@router.get(
+    "/gene_mappings",
+    response_model=GeneMappingOut,
+    summary="Get the entrez ID ↔ gene symbol mapping",
+    responses={404: {"description": "No gene mapping is loaded on this server"}},
+)
 def get_gene_mappings(
     svc: Annotated[GeneMappingService, Depends(get_gene_mapping_service)],
 ) -> GeneMappingOut:
-    """Retrieve the gene symbol ↔ entrez ID mapping.
+    """The mapping from entrez ID (the label used for genes everywhere in this
+    API) to gene symbol, loaded from Taiga when the server starts. Use it to
+    translate symbols to IDs for `select` and IDs back to symbols in results.
+    It does not change while the server runs, so fetch it once and cache it.
 
-    Sourced from Taiga at server startup. The client uses this to translate between
-    entrez IDs (used throughout the query API) and human-readable gene symbols.
-    Fetch once and cache locally; the mapping does not change at runtime.
-
-    Returns `404` if the server is misconfigured or the Taiga ID was not set.
+    Returns `404` if no Taiga ID is configured or the mapping failed to load
+    (see `GET /health`).
     """
     if not svc.is_loaded:
         raise HTTPException(

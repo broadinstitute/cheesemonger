@@ -25,11 +25,11 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 _LABEL_TRUNCATION_THRESHOLD = 100
 
 
-@router.get("", response_model=DatasetListOut)
+@router.get("", response_model=DatasetListOut, summary="List datasets")
 def list_datasets(
     db: Annotated[Session, Depends(get_db)],
 ) -> DatasetListOut:
-    """List all datasets available on this server."""
+    """List every dataset on this server, with its block and datatype counts."""
     datasets = ds_crud.list_datasets(db)
     summaries = [
         DatasetSummary(
@@ -42,17 +42,22 @@ def list_datasets(
     return DatasetListOut(datasets=summaries)
 
 
-@router.get("/{dataset}", response_model=DatasetDetail)
+@router.get(
+    "/{dataset}",
+    response_model=DatasetDetail,
+    summary="Get dataset metadata",
+    responses={404: {"description": "Dataset not found"}},
+)
 def get_dataset(
     dataset: str,
     db: Annotated[Session, Depends(get_db)],
 ) -> DatasetDetail:
-    """Full metadata for a dataset.
+    """Everything needed to write a query: the block key (`last_dimension`),
+    each dimension with its labels, the loaded blocks, the datatypes and the
+    dimensions each spans, and the storage chunk shape.
 
-    Returns the schema (dimensions with coordinate labels, datatypes, chunk shape)
-    plus runtime fields — loaded blocks and dimension sizes. Dimensions with more
-    than 100 labels are truncated to a 5-element sample; use
-    `GET /datasets/{dataset}/dimensions/{dim}` for the full label list with paging.
+    Dimensions with more than 100 labels are truncated to a 5-label sample; use
+    `GET /datasets/{dataset}/dimensions/{dim}` for the full, pageable list.
     """
     ds = ds_crud.get_dataset_by_name(db, dataset)
     if ds is None:
@@ -84,22 +89,28 @@ def get_dataset(
     )
 
 
-@router.get("/{dataset}/dimensions/{dim}", response_model=DimensionLabelsOut)
+@router.get(
+    "/{dataset}/dimensions/{dim}",
+    response_model=DimensionLabelsOut,
+    summary="List all labels of one dimension",
+    responses={404: {"description": "Dataset or dimension not found"}},
+)
 def get_dimension_labels(
     dataset: str,
     dim: str,
     db: Annotated[Session, Depends(get_db)],
-    offset: Annotated[int, Query(ge=0)] = 0,
-    limit: Annotated[int | None, Query(gt=0)] = None,
+    offset: Annotated[int, Query(ge=0, description="Index of the first label to return.")] = 0,
+    limit: Annotated[
+        int | None, Query(gt=0, description="Maximum labels to return (default: all).")
+    ] = None,
 ) -> DimensionLabelsOut:
-    """Full coordinate labels for a single dimension, with paging.
+    """The complete label list for one dimension, which
+    `GET /datasets/{dataset}` truncates when it is large. Labels are the union
+    across all loaded blocks. Pass the block key (the dataset's
+    `last_dimension`, e.g. `Screen`) to list the loaded blocks.
 
-    Unlike `GET /datasets/{dataset}`, which truncates large label lists to a sample,
-    this returns the complete label list. Pass the `last_dimension` name (e.g. `screen`)
-    to list the loaded blocks instead of an array dimension.
-
-    `size` in the response is always the total count before paging; `labels` is the
-    `offset`/`limit` slice. The labels are the present union across all loaded blocks.
+    `offset` and `limit` page through the list; `size` is always the total
+    count.
     """
     ds = ds_crud.get_dataset_by_name(db, dataset)
     if ds is None:

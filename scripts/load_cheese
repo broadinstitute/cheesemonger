@@ -13,6 +13,7 @@
 #   load_cheese delete-dataset --dataset degs --force
 #   load_cheese status
 #   load_cheese status --dataset degs
+#   load_cheese reconcile --dataset degs
 #   load_cheese load --help          # full flag reference for any subcommand
 #
 # Env:
@@ -31,10 +32,12 @@ load_cheese — cheesemonger admin CLI wrapper (runs inside the Docker container
 Usage:
   load_cheese load          --source <gs://...|path> --dataset <name> --block <name>
                             [--create-dataset] [--skip-existing]
-                            [--last-dimension screen] [--chunk DIM=SIZE ...]
+                            [--last-dimension Screen] [--chunk DIM=SIZE ...]
+                            [--gene-dim DIM ... --gene-universe-taiga-id <id>]
   load_cheese delete-block  --dataset <name> --block <name>
   load_cheese delete-dataset --dataset <name> [--force]
   load_cheese status        [--dataset <name>]
+  load_cheese reconcile     --dataset <name>
 
   load_cheese <subcommand> --help   # detailed flags
 

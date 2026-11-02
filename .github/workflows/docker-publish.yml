@@ -1,12 +1,14 @@
 name: Build & push Cheesemonger image
 
-# Builds the server image and pushes it to the CDS Artifact Registry Docker repo.
+# Builds the server image and pushes it to GCR (us.gcr.io; temporarily, instead
+# of the CDS Artifact Registry Docker repo; see the NOTE just above `env:`).
 # Runs only when server code or build inputs change (path filter below), on the
 # default branch, plus manual dispatch.
 #
 # Required repository configuration (Settings -> Secrets and variables -> Actions):
 #   vars.GCP_WORKLOAD_IDENTITY_PROVIDER  e.g. projects/123/locations/global/workloadIdentityPools/gh/providers/gh
-#   vars.GCP_SERVICE_ACCOUNT             a service account with Artifact Registry Writer on cds-docker-containers
+#   vars.GCP_SERVICE_ACCOUNT             a service account with push access on cds-docker-containers
+#                                        (GCR storage write now; Artifact Registry Writer after the switch)
 # (Alternatively, swap the auth step for a service-account JSON key in secrets.)
 
 on:
@@ -28,7 +30,7 @@ permissions:
 # NOTE: temporarily publishing to GCR (us.gcr.io) instead of the Artifact
 # Registry docker repo, because dev.cds.team's docker credential helper is wired
 # for GCR but not yet for *.pkg.dev. Switch back to AR once that's fixed
-# (see docs/planning.md).
+# (tracked in docs/project_status.md).
 env:
   IMAGE: us.gcr.io/cds-docker-containers/cheesemonger
 

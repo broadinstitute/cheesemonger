@@ -30,9 +30,9 @@ class DatasetIn(BaseModel):
 
 
 class DatasetSummary(BaseModel):
-    name: str
-    blocks: int
-    datatypes: int
+    name: str = Field(description="Dataset name, used in `/datasets/{dataset}/...` paths.")
+    blocks: int = Field(description="Number of loaded blocks (e.g. screens).")
+    datatypes: int = Field(description="Number of datatypes.")
 
 
 class DatasetListOut(BaseModel):
@@ -40,28 +40,49 @@ class DatasetListOut(BaseModel):
 
 
 class BlockInfo(BaseModel):
-    name: str
-    loaded_at: str
+    name: str = Field(description="Block name: a label of the dataset's `last_dimension`.")
+    loaded_at: str = Field(description="When the block was loaded (ISO 8601).")
 
 
 class DimensionInfo(BaseModel):
     name: str
-    size: int
-    labels: list[str] | None = None
-    labels_truncated: bool = False
-    labels_sample: list[str] | None = None
+    size: int = Field(description="Number of labels across all loaded blocks.")
+    labels: list[str] | None = Field(
+        default=None, description="All labels; `null` when the dimension is truncated."
+    )
+    labels_truncated: bool = Field(
+        default=False,
+        description=(
+            "True for dimensions with more than 100 labels. Use "
+            "`GET /datasets/{dataset}/dimensions/{dim}` for the full list."
+        ),
+    )
+    labels_sample: list[str] | None = Field(
+        default=None, description="The first 5 labels, when truncated."
+    )
 
 
 class DimensionLabelsOut(BaseModel):
     name: str
-    size: int  # total number of labels (before any offset/limit paging)
-    labels: list[str]
+    size: int = Field(description="Total number of labels, before `offset`/`limit` paging.")
+    labels: list[str] = Field(description="The requested page of labels.")
 
 
 class DatasetDetail(BaseModel):
     name: str
-    last_dimension: str
-    dimensions: list[DimensionInfo]
-    blocks: list[BlockInfo]
-    datatypes: list[DatatypeSpec]
-    chunk_shape: list[ChunkDim]
+    last_dimension: str = Field(
+        description=(
+            "Name of the block key (e.g. `Screen`). Use it in `select` like any other "
+            "dimension; it is case-sensitive."
+        )
+    )
+    dimensions: list[DimensionInfo] = Field(
+        description="Array dimensions within a block (not including `last_dimension`)."
+    )
+    blocks: list[BlockInfo] = Field(description="Loaded blocks, sorted by name.")
+    datatypes: list[DatatypeSpec] = Field(
+        description="Datatypes and the dimensions each one spans."
+    )
+    chunk_shape: list[ChunkDim] = Field(
+        description="Storage chunk size per dimension; unlisted dimensions are one chunk."
+    )
