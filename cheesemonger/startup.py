@@ -35,23 +35,6 @@ except metadata.PackageNotFoundError:
 _DESCRIPTION = """
 Read-only API for multi-dimensional perturb-seq data stored as xarray/Zarr.
 
-**Data model.** A *dataset* has named *dimensions* (e.g. `Timepoint`, `Target`,
-`Response`) and *datatypes* (measured quantities such as `ZScore`, `L2FC`,
-`FDR`). Its *last dimension* (the block key, usually `Screen`) splits it into
-*blocks*, one per screen. In requests the block key behaves like any other
-dimension. Its name is set per dataset and is case-sensitive: read it from
-`last_dimension` in `GET /datasets/{dataset}`.
-
-**Selecting.** A `select` entry with a single label fixes that dimension and
-drops it from the result; a list of labels keeps it, in the given order; an
-omitted dimension is returned in full (for the block key: all blocks).
-
-**Labels.** Gene dimensions are labelled by entrez ID (as strings). Use
-`GET /gene_mappings` to translate to and from gene symbols.
-
-**Loading.** Datasets and blocks are created and deleted with the admin CLI
-(`python -m cheesemonger load | delete-block | delete-dataset`), never over HTTP.
-
 The Python client [cheesypy](https://github.com/broadinstitute/cheesemonger/tree/main/clients/cheesypy)
 wraps these endpoints and returns pandas objects.
 """

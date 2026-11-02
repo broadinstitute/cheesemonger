@@ -325,8 +325,6 @@ orphan sweep (§10).
 
 ## 10. Known limitations
 
-Project-level status and future work: [project_status.md](project_status.md).
-
 - **No global orphan sweep.** An unregistered block directory is cleaned up only
   when that same block is loaded again (§9); `reconcile` rebuilds the present
   union but does not delete stray directories.

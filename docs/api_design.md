@@ -27,8 +27,7 @@ deleting a block, and deleting a dataset all happen through the CLI loader on th
 server — see [Data mutations (CLI)](#data-mutations-cli) below. This keeps the
 service surface read-only: a client can never alter stored data.
 
-> **Note:** there is currently no authentication (see
-> [project_status.md](project_status.md)). On dev.cds.team the service sits
+> **Note:** there is currently no authentication in the app. On dev.cds.team the service sits
 > behind oauth2_proxy (Broad OAuth), which gates all of these at the network edge.
 
 ### Dimension names in the examples
@@ -49,8 +48,9 @@ Labels on the wire are always raw storage labels, so gene coordinates are
 server never translates them. Translation to gene symbols happens client-side,
 using `GET /gene_mappings`. The cheesypy client translates only the dimensions in
 its `GENE_DIMENSIONS` set and the string datatypes in `GENE_DATATYPES` (e.g.
-`CorrelateResponse`), and leaves everything else (`Rank`, `Timepoint`, …) alone.
-See [gene_symbol_relabel_issue.md](gene_symbol_relabel_issue.md).
+`CorrelateResponse`), and leaves everything else (`Rank`, `Timepoint`, …) alone,
+because an entrez ID is indistinguishable from a small integer (entrez 1 is
+A1BG). See the cheesypy README's "Gene symbols" section.
 
 ---
 
@@ -1100,4 +1100,4 @@ behavior differs from it in a few ways:
 - Authentication (today the service relies on oauth2_proxy at the network edge).
 - Client reshaping for results with 3+ free dimensions.
 - `/filter`: multiple AND-combined predicates, combining `filter` with `aggregate`, filtering on a datatype whose dims differ from the returned datatypes, and a byte-based cap (like `/query`'s `413`) in addition to the row cap.
-- Server-declared gene dimensions/datatypes (so clients don't hard-code `GENE_DIMENSIONS` / `GENE_DATATYPES`; see [gene_symbol_relabel_issue.md](gene_symbol_relabel_issue.md)).
+- Server-declared gene dimensions/datatypes (so clients don't hard-code `GENE_DIMENSIONS` / `GENE_DATATYPES`).
